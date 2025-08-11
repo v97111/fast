@@ -1,31 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-Fast-cycle Binance bot + Flask dashboard (multi-card version)
+Fast-cycle Binance bot + Flask dashboard (multi-card + debug + mobile UI)
 - Multiple concurrent workers ("cards"), each with its own quote amount
-- Prevents opening more than one position per symbol at the same time
-- Per-card states with spinner while scanning/buying/selling
-- Auto-filter watchlist to valid symbols (Testnet/Live)
-- Loosened buy filters for faster testing
-- Global PnL in $ and % using net account value (USDT + assets in USDT)
-- Full trade history served to UI
+- Prevent duplicate positions per symbol
+- Auto-filter watchlist per exchange (Testnet/Live)
+- Loosened buy filters (faster testing)
+- Global PnL in $ and % using net account value (USDT + assets valued in USDT)
+- Full trade history + Debug panel (why buys were rejected)
 
-Requirements:
-  py -m pip install flask python-binance python-dotenv
-
-.env:
+Env (.env locally or Railway Variables):
   BINANCE_API_KEY=...
   BINANCE_API_SECRET=...
   BINANCE_TESTNET=true
   PORT=8080
+
+Run locally:
+  py -m pip install flask gunicorn python-binance python-dotenv
+  py main.py
 """
 import os, time, csv, math, threading, sys
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
-from typing import Dict, List, Tuple
+from typing import Dict
 from flask import Flask, render_template, jsonify, request
 from dotenv import load_dotenv
 from binance.client import Client
-from binance.enums import *
 
 # =========================
 # Config
@@ -57,16 +56,20 @@ TP_TRIGGER_PCT = 0.010
 TRAIL_GIVEBACK_PCT = 0.004
 
 # Loosened buy filters for testing
-MIN_DAY_VOLATILITY_PCT = 0.5
-MICRO_PULLBACK_DROP_PCT = 0.001
-VOLUME_SPIKE_MULT = 1.1
+MIN_DAY_VOLATILITY_PCT = 0.5        # % 24h range requirement
+MICRO_PULLBACK_DROP_PCT = 0.001     # % dip in prev candle
+VOLUME_SPIKE_MULT = 1.1             # last vol vs avg10
 COOLDOWN_MINUTES = 8
 
 POLL_SECONDS_IDLE = 2
 POLL_SECONDS_ACTIVE = 2
 
-LOG_FILE = "fast_cycle_trades.csv"
-RECENT_TRADES_LIMIT = 200  # returned to UI; "All history" means up to this cap per API
+LOG_FILE = os.getenv("LOG_FILE", "fast_cycle_trades.csv")
+RECENT_TRADES_LIMIT = 300  # returned to UI
+
+# Debug
+DEBUG_MODE = True
+DEBUG_BUFFER = 300  # how many recent rejections to remember
 
 # =========================
 # Helpers
@@ -170,9 +173,7 @@ def filter_valid_symbols(client, watchlist):
 
 # Account value helpers
 def get_all_prices(client) -> Dict[str, float]:
-    # returns symbol->price for e.g. BTCUSDT etc
-    tickers = client.get_all_tickers()
-    return {t["symbol"]: float(t["price"]) for t in tickers}
+    return {t["symbol"]: float(t["price"]) for t in client.get_all_tickers()}
 
 def get_net_usdt_value(client) -> float:
     """USDT balance + sum(other assets * assetUSDT price)."""
@@ -181,8 +182,7 @@ def get_net_usdt_value(client) -> float:
     total = 0.0
     for b in acct["balances"]:
         asset = b["asset"]
-        free = float(b["free"]); locked = float(b["locked"])
-        amt = free + locked
+        amt = float(b["free"]) + float(b["locked"])
         if amt == 0.0:
             continue
         if asset == "USDT":
@@ -192,43 +192,57 @@ def get_net_usdt_value(client) -> float:
             p = prices.get(pair)
             if p:
                 total += amt * p
-            # if no USDT pair, ignore for simplicity
     return total
 
 # =========================
-# Signals
+# Signals (with debug flags)
 # =========================
-def passes_buy_criteria(client, symbol, cache):
+def evaluate_buy_checks(client, symbol, cache):
+    """
+    Evaluate all buy filters and return granular flags + reason.
+    """
+    # 24h volatility
     _, day_move = get_24h_stats(client, symbol)
-    if day_move < MIN_DAY_VOLATILITY_PCT:
-        return False, "low_24h_move"
+    day_ok = day_move >= MIN_DAY_VOLATILITY_PCT
 
+    # candles
     candles = cache.get(symbol)
     if candles is None:
         candles = get_klines(client, symbol)
         cache[symbol] = candles
     if len(candles) < 60:
-        return False, "few_candles"
+        return {"ok": False, "reason": "few_candles", "day_ok": day_ok, "ema_ok": False, "vol_ok": False, "pattern_ok": False}
 
     closes = [c["close"] for c in candles]
     vols   = [c["volume"] for c in candles]
+
+    # trend
     ema50  = ema(closes[-60:], 50)
-    if ema50 is None or closes[-1] <= ema50:
-        return False, "below_ema50"
+    ema_ok = (ema50 is not None) and (closes[-1] > ema50)
 
-    if len(vols) < 11:
-        return False, "few_vols"
-    avg10 = sum(vols[-11:-1]) / 10.0
-    if avg10 <= 0 or vols[-1] < VOLUME_SPIKE_MULT * avg10:
-        return False, "no_vol_spike"
+    # volume spike
+    vol_ok = False
+    if len(vols) >= 11:
+        avg10 = sum(vols[-11:-1]) / 10.0
+        vol_ok = (avg10 > 0) and (vols[-1] >= VOLUME_SPIKE_MULT * avg10)
 
-    c_prev = candles[-2]; c_last = candles[-1]
-    dipped = (c_prev["close"] - c_prev["low"]) / c_prev["close"] >= MICRO_PULLBACK_DROP_PCT
-    recovered = c_last["close"] > c_prev["high"]
-    if not (dipped and recovered):
-        return False, "no_pullback_recovery"
+    # micro pullback + recovery
+    pattern_ok = False
+    if len(candles) >= 2:
+        c_prev = candles[-2]; c_last = candles[-1]
+        dipped = (c_prev["close"] - c_prev["low"]) / max(c_prev["close"], 1e-12) >= MICRO_PULLBACK_DROP_PCT
+        recovered = c_last["close"] > c_prev["high"]
+        pattern_ok = dipped and recovered
 
-    return True, "ok"
+    # determine first failing reason
+    if not day_ok:      reason = "low_24h_move"
+    elif not ema_ok:    reason = "below_ema50"
+    elif not vol_ok:    reason = "no_vol_spike"
+    elif not pattern_ok:reason = "no_pullback_recovery"
+    else:               reason = "ok"
+
+    return {"ok": (reason == "ok"), "reason": reason,
+            "day_ok": day_ok, "ema_ok": ema_ok, "vol_ok": vol_ok, "pattern_ok": pattern_ok}
 
 # =========================
 # Orders
@@ -276,10 +290,10 @@ class WorkerState:
     def __init__(self, wid: int, quote: float):
         self.id = wid
         self.quote = quote
-        self.status = "idle"  # idle | scanning | buying | in_position | selling | cooldown | error | stopped
+        self.status = "scanning"  # idle|scanning|buying|in_position|selling|cooldown|error|stopped
         self.symbol = None
         self.last_pnl = None
-        self.note = "Waiting to start"
+        self.note = "Scanning watchlist…"
         self.updated = now_utc().isoformat()
 
 class FastCycleBot:
@@ -289,7 +303,7 @@ class FastCycleBot:
         self._worker_state: Dict[int, WorkerState] = {}
         self._stop_flags: Dict[int, threading.Event] = {}
         self._lock = threading.Lock()
-        self._active_symbols = set()  # symbols currently in position (prevent duplicates)
+        self._active_symbols = set()
         self._candles_cache = {}
         self._last_sell_time = defaultdict(lambda: datetime.min.replace(tzinfo=timezone.utc))
         self._running = False
@@ -304,6 +318,9 @@ class FastCycleBot:
         # background refresher
         self._metrics_thread = None
         self._metrics_stop = threading.Event()
+
+        # debug events
+        self._debug_events = deque(maxlen=DEBUG_BUFFER)
 
     # ---- lifecycle ----
     def start_core(self):
@@ -347,9 +364,24 @@ class FastCycleBot:
             try:
                 if self._client:
                     self.current_net_usdt = get_net_usdt_value(self._client)
-            except Exception as e:
+            except Exception:
                 pass
             time.sleep(6)
+
+    # ---- debug helper ----
+    def _debug_push(self, symbol, wid, flags):
+        if not DEBUG_MODE or not flags:
+            return
+        self._debug_events.append({
+            "time": now_utc().isoformat(),
+            "symbol": symbol,
+            "worker_id": wid,
+            "reason": flags.get("reason"),
+            "day_ok": flags.get("day_ok"),
+            "ema_ok": flags.get("ema_ok"),
+            "vol_ok": flags.get("vol_ok"),
+            "pattern_ok": flags.get("pattern_ok"),
+        })
 
     # ---- workers ----
     def add_worker(self, quote_amount: float) -> int:
@@ -360,8 +392,6 @@ class FastCycleBot:
             while wid in self._workers:
                 wid += 1
             state = WorkerState(wid, float(quote_amount))
-            state.status = "scanning"
-            state.note = "Scanning watchlist…"
             self._worker_state[wid] = state
             stop_ev = threading.Event()
             self._stop_flags[wid] = stop_ev
@@ -383,7 +413,6 @@ class FastCycleBot:
         st.updated = now_utc().isoformat()
 
     def _eligible_symbol(self, sym: str) -> bool:
-        # prevent buying same coin twice at a time
         return sym not in self._active_symbols and (now_utc() - self._last_sell_time[sym]).total_seconds() >= COOLDOWN_MINUTES*60
 
     def _worker_loop(self, wid: int, stop_ev: threading.Event):
@@ -396,12 +425,14 @@ class FastCycleBot:
                 picked = None
                 for sym in WATCHLIST:
                     if stop_ev.is_set(): break
-                    if not self._eligible_symbol(sym): 
+                    if not self._eligible_symbol(sym):
                         continue
-                    ok, reason = passes_buy_criteria(client, sym, self._candles_cache)
-                    if ok:
-                        picked = (sym, reason)
+                    flags = evaluate_buy_checks(client, sym, self._candles_cache)
+                    if flags["ok"]:
+                        picked = (sym, flags["reason"])
                         break
+                    else:
+                        self._debug_push(sym, wid, flags)
                     time.sleep(0.05)
                 if not picked:
                     time.sleep(POLL_SECONDS_IDLE)
@@ -530,20 +561,20 @@ def dashboard():
     recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
     state = bot.dashboard_state()
     return render_template(
-    "dashboard.html",
-    state=state,
-    recent_trades=recent,
-    watchlist=",".join(WATCHLIST),   # can keep if you still show it as text
-    watchlist_list=WATCHLIST,        # <-- add this
-    tp_trigger_pct=TP_TRIGGER_PCT*100,
-    trail_pct=TRAIL_GIVEBACK_PCT*100,
-    sl_pct=STOP_LOSS_PCT*100,
-    time_limit=MAX_TRADE_MINUTES,
-    min_day_vol=MIN_DAY_VOLATILITY_PCT,
-    pullback_req=MICRO_PULLBACK_DROP_PCT*100,
-    vol_mult=VOLUME_SPIKE_MULT,
-    recent_limit=RECENT_TRADES_LIMIT
-)
+        "dashboard.html",
+        state=state,
+        recent_trades=recent,
+        watchlist=",".join(WATCHLIST),
+        watchlist_list=WATCHLIST,
+        tp_trigger_pct=TP_TRIGGER_PCT*100,
+        trail_pct=TRAIL_GIVEBACK_PCT*100,
+        sl_pct=STOP_LOSS_PCT*100,
+        time_limit=MAX_TRADE_MINUTES,
+        min_day_vol=MIN_DAY_VOLATILITY_PCT,
+        pullback_req=MICRO_PULLBACK_DROP_PCT*100,
+        vol_mult=VOLUME_SPIKE_MULT,
+        recent_limit=RECENT_TRADES_LIMIT
+    )
 
 @app.get("/api/status")
 def api_status():
@@ -552,6 +583,17 @@ def api_status():
 @app.get("/api/trades")
 def api_trades():
     return jsonify({"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
+
+@app.get("/api/debug")
+def api_debug():
+    events = list(bot._debug_events)[-100:]
+    counts = defaultdict(int)
+    for e in events:
+        counts[e["reason"]] += 1
+    return jsonify({
+        "events": events[::-1],
+        "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
+    })
 
 @app.post("/api/start-core")
 def api_start_core():
