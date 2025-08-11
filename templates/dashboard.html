@@ -7,8 +7,7 @@
   <style>
     :root {
       --bg: #0b1020; --card: #111831; --muted:#9aa4b2; --text:#e8ecf1;
-      --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058;
-      --warn:#f59e0b;
+      --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058; --warn:#f59e0b;
     }
     * { box-sizing: border-box; }
     html, body { max-width: 100%; overflow-x: hidden; }
@@ -18,32 +17,24 @@
       color: var(--text); margin: 0;
     }
     header {
-      position: sticky; top: 0; z-index: 10;
-      backdrop-filter: blur(8px);
-      background: rgba(11,16,32,.7);
-      border-bottom: 1px solid rgba(255,255,255,.06);
-      padding: 14px 22px; display:flex; align-items:center; justify-content:space-between;
+      position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px);
+      background: rgba(11,16,32,.7); border-bottom: 1px solid rgba(255,255,255,.06);
+      padding: 14px 16px; display:flex; align-items:center; justify-content:space-between;
     }
-    h1 { margin:0; font-size: 20px; }
-    .container { padding: 22px; max-width: 1200px; width: 100%; margin: 0 auto; }
-    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-    .btn {
-      padding:10px 16px; border:0; border-radius:10px; cursor:pointer; color:#fff; transition:transform .05s ease;
-    }
+    h1 { margin:0; font-size: 18px; }
+    .container { padding: 16px; max-width: 1100px; width: 100%; margin: 0 auto; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn { padding:10px 14px; border:0; border-radius:10px; cursor:pointer; color:#fff; transition:transform .05s ease; }
     .btn:active { transform: translateY(1px); }
-    .start { background: var(--good); }
-    .stop  { background: var(--bad); }
-    .add   { background: var(--accent); }
+    .start { background: var(--good); } .stop { background: var(--bad); } .add { background: var(--accent); }
     .card {
       background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02));
-      border: 1px solid var(--border);
-      border-radius: 16px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25);
-      width: 100%;
+      border: 1px solid var(--border); border-radius: 16px; padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25); width: 100%;
     }
 
     /* Responsive grids */
-    .grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
-    .grid-3 { display: grid; grid-template-columns: 1fr; gap: 18px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr; gap: 12px; }
     @media (min-width: 900px) {
       .grid { grid-template-columns: 1.2fr .8fr; }
       .grid-3 { grid-template-columns: repeat(2, 1fr); }
@@ -52,30 +43,38 @@
       .grid-3 { grid-template-columns: repeat(3, 1fr); }
     }
 
-    .kv { display: grid; grid-template-columns: 180px 1fr; gap: 8px; }
+    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px; }
+    @media (max-width: 480px){ .kv { grid-template-columns: 1fr; } } /* stack labels on phones */
+
     .muted { color: var(--muted); }
     code, .chip { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
     .chip { background: var(--chip); padding: 2px 8px; border-radius: 999px; display:inline-block; }
     .chips { display:flex; flex-wrap:wrap; gap:6px; max-width:100%; }
-
-    table { width: 100%; border-collapse: collapse; font-size: 14px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-    thead { background: #0f1a3a; }
-    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
-    tr:last-child td { border-bottom: 0; }
-    .pnl-pos { color: var(--good); }
-    .pnl-neg { color: var(--bad); }
-
     .spinner {
-      width: 18px; height: 18px; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%;
+      width: 16px; height: 16px; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%;
       animation: spin .9s linear infinite; display:inline-block; vertical-align:middle;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .warn { color: var(--warn); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    thead { background: #0f1a3a; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: 0; }
+    .pnl-pos { color: var(--good); } .pnl-neg { color: var(--bad); }
+
+    /* Phone: hide less-important columns to avoid sideways scroll */
+    @media (max-width: 640px){
+      .col-worker, .col-qty, .col-note { display: none; }
+      table { font-size: 13px; }
+    }
+
     input[type="number"] {
       background: #0e1631; border:1px solid var(--border); border-radius:10px; color:var(--text);
-      padding:8px 10px; width:130px;
+      padding:8px 10px; width:120px;
     }
+
+    details { background: rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:8px; padding:6px 10px; }
+    summary { cursor:pointer; color: var(--accent); font-weight:600; }
   </style>
 </head>
 <body>
@@ -95,10 +94,10 @@
     <div class="grid">
       <!-- Left: Global stats + Workers -->
       <div class="card">
-        <h3 style="margin:0 0 12px">Global Status</h3>
+        <h3 style="margin:0 0 10px">Global Status</h3>
         <div class="kv" id="global">
           <div>Watchlist:</div>
-          <div>Valid <span id="wlc">-</span> <span class="muted">(filtered from <span id="wlt">-</span>)</span></div>
+          <div>Valid <span id="wlc">-</span> <span class="muted">(from <span id="wlt">-</span>)</span></div>
 
           <div>Start Net (USDT):</div><div id="startv">-</div>
           <div>Current Net (USDT):</div><div id="curv">-</div>
@@ -110,41 +109,66 @@
           <div><code>DayMove≥{{ min_day_vol }}%, Pullback≥{{ pullback_req }}%, VolSpike≥{{ vol_mult }}×</code></div>
 
           <div>Exit Rules:</div>
-          <div><code>TP Trigger {{ tp_trigger_pct }}% → Trail {{ trail_pct }}% | SL {{ sl_pct }}% | Time {{ time_limit }}m</code></div>
+          <div><code>TP {{ tp_trigger_pct }}% → Trail {{ trail_pct }}% | SL {{ sl_pct }}% | Time {{ time_limit }}m</code></div>
 
           <div>Watchlist Symbols:</div>
-<div>
-  <details style="background: var(--chip); border-radius:8px; padding:4px 8px; max-width:100%">
-    <summary style="cursor:pointer; color:var(--accent); font-weight:500">View Symbols ({{ watchlist_list|length }})</summary>
-    <div class="chips" style="margin-top:8px">
-      {% for sym in watchlist_list %}
-        <span class="chip">{{ sym }}</span>
-      {% endfor %}
-    </div>
-  </details>
-</div>
+          <div>
+            <details>
+              <summary>View Symbols ({{ watchlist_list|length }})</summary>
+              <div class="chips" style="margin-top:8px">
+                {% for sym in watchlist_list %}
+                  <span class="chip">{{ sym }}</span>
+                {% endfor %}
+              </div>
+            </details>
+          </div>
         </div>
 
-        <hr style="border-color: #223058; margin:16px 0">
-        <h3 style="margin:0 0 12px">Worker Cards</h3>
+        <hr style="border-color: #223058; margin:12px 0">
+        <h3 style="margin:0 0 10px">Worker Cards</h3>
         <div id="cards" class="grid-3"></div>
-        <div class="muted" style="margin-top:8px">
+        <div class="muted" style="margin-top:6px">
           Cards scan concurrently. A spinner shows when scanning/buying/selling.
+        </div>
+
+        <!-- Debug Panel -->
+        <div class="card" style="margin-top:12px">
+          <h3 style="margin:0 0 10px">Debug: Why buys are rejected</h3>
+          <div class="row" id="dbg-counts" style="flex-wrap:wrap; gap:6px; margin-bottom:8px">
+            <!-- chips with reason counts -->
+          </div>
+          <div style="overflow:auto; max-width:100%; max-height:40vh">
+            <table id="dbg-table">
+              <thead>
+                <tr>
+                  <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Reason</th>
+                  <th>24h</th><th>EMA</th><th>Vol</th><th class="col-note">Pattern</th>
+                </tr>
+              </thead>
+              <tbody id="dbg-body">
+                <tr><td colspan="8" class="muted">Collecting rejections…</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="muted" style="margin-top:6px">Updates every 2s. Toggle DEBUG_MODE in code to disable.</div>
         </div>
       </div>
 
       <!-- Right: Trade history -->
       <div class="card">
-        <h3 style="margin:0 0 12px">All Trade History</h3>
+        <h3 style="margin:0 0 10px">All Trade History</h3>
         <div style="overflow:auto; max-width:100%; max-height:70vh">
           <table id="trades">
             <thead>
-              <tr><th>Time (UTC)</th><th>Worker</th><th>Symbol</th><th>Action</th><th>Price</th><th>Qty</th><th>PnL %</th><th>Note</th></tr>
+              <tr>
+                <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Action</th>
+                <th>Price</th><th class="col-qty">Qty</th><th>PnL %</th><th class="col-note">Note</th>
+              </tr>
             </thead>
             <tbody id="tbody"></tbody>
           </table>
         </div>
-        <div class="muted" style="margin-top:8px">
+        <div class="muted" style="margin-top:6px">
           Auto-refreshing every 2s (showing up to {{ recent_limit }} rows).
         </div>
       </div>
@@ -153,6 +177,9 @@
 
   <script>
     const tbody = document.getElementById('tbody');
+    const dbgBody = document.getElementById('dbg-body');
+    const dbgCounts = document.getElementById('dbg-counts');
+
     function cls(v){ return (v>=0) ? 'pnl-pos' : 'pnl-neg'; }
     function fmt(v, d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
     async function post(url, body){
@@ -183,7 +210,7 @@
         const card = document.createElement('div');
         card.className = 'card';
         card.innerHTML = `
-          <div class="row" style="justify-content:space-between; margin-bottom:8px">
+          <div class="row" style="justify-content:space-between; margin-bottom:6px">
             <div><strong>Card #${w.id}</strong> • <span class="muted">${(w.updated||'').replace('T',' ').replace('Z','')}</span></div>
             <button class="btn stop" onclick="stopWorker(${w.id})">Stop</button>
           </div>
@@ -199,10 +226,50 @@
       });
     }
 
+    function boolBadge(ok){
+      return ok ? '<span class="chip" style="background:#11361f;color:#86efac">OK</span>'
+                : '<span class="chip" style="background:#3a0e12;color:#fca5a5">NO</span>';
+    }
+    function renderDebugCounts(counts){
+      dbgCounts.innerHTML = '';
+      const keys = Object.keys(counts);
+      if(keys.length === 0){
+        dbgCounts.innerHTML = '<span class="muted">No data yet</span>';
+        return;
+      }
+      keys.forEach(k=>{
+        const span = document.createElement('span');
+        span.className = 'chip';
+        span.textContent = `${k}: ${counts[k]}`;
+        dbgCounts.appendChild(span);
+      });
+    }
+    function renderDebugEvents(events){
+      dbgBody.innerHTML = '';
+      if(!events || events.length === 0){
+        const tr = document.createElement('tr');
+        const td = document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No debug events yet.';
+        tr.appendChild(td); dbgBody.appendChild(tr); return;
+      }
+      events.forEach(e=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${(e.time||'').replace('T',' ').replace('Z','')}</td>
+          <td class="col-worker">${e.worker_id ?? ''}</td>
+          <td>${e.symbol}</td>
+          <td><span class="chip">${e.reason}</span></td>
+          <td>${boolBadge(!!e.day_ok)}</td>
+          <td>${boolBadge(!!e.ema_ok)}</td>
+          <td>${boolBadge(!!e.vol_ok)}</td>
+          <td class="col-note">${boolBadge(!!e.pattern_ok)}</td>
+        `;
+        dbgBody.appendChild(tr);
+      });
+    }
+
     async function refresh(){
       try {
         const st = await (await fetch('/api/status')).json();
-        // global
         document.getElementById('wlc').textContent = st.watchlist_count ?? '-';
         document.getElementById('wlt').textContent = st.watchlist_total ?? '-';
         document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':fmt(st.start_net_usdt,2));
@@ -225,22 +292,32 @@
             const pnl = parseFloat(r.pnl_pct||'');
             tr.innerHTML = `
               <td>${r.time}</td>
-              <td>${r.worker_id||''}</td>
+              <td class="col-worker">${r.worker_id||''}</td>
               <td>${r.symbol}</td>
               <td><span class="chip">${r.action}</span></td>
               <td>${r.price}</td>
-              <td>${r.qty}</td>
+              <td class="col-qty">${r.qty}</td>
               <td class="${isNaN(pnl)?'':cls(pnl)}">${r.pnl_pct||''}</td>
-              <td>${r.note||''}</td>`;
+              <td class="col-note">${r.note||''}</td>`;
             tbody.appendChild(tr);
           });
         }
       } catch(e){}
     }
 
+    async function refreshDebug(){
+      try{
+        const r = await fetch('/api/debug');
+        const data = await r.json();
+        renderDebugCounts(data.counts || {});
+        renderDebugEvents(data.events || []);
+      }catch(e){}
+    }
+
     setInterval(refresh, 2000);
+    setInterval(refreshDebug, 2000);
     // auto start core on first load (remove if you prefer manual)
-    post('/api/start-core').then(refresh);
+    post('/api/start-core').then(()=>{ refresh(); refreshDebug(); });
   </script>
 </body>
 </html>
