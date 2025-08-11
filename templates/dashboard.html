@@ -6,86 +6,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
-      --bg: #0b1020; --card: #111831; --muted:#9aa4b2; --text:#e8ecf1;
+      --bg:#0b1020; --card:#111831; --muted:#9aa4b2; --text:#e8ecf1;
       --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058; --warn:#f59e0b;
     }
-    * { box-sizing: border-box; }
-    html, body { max-width: 100%; overflow-x: hidden; }
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
-      background: radial-gradient(1200px 600px at 20% -10%, #162042 0%, var(--bg) 40%);
-      color: var(--text); margin: 0;
+    *{box-sizing:border-box}
+    html,body{max-width:100%;overflow-x:hidden}
+    body{
+      font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial,sans-serif;
+      background:radial-gradient(1200px 600px at 20% -10%,#162042 0%,var(--bg) 40%); color:var(--text); margin:0;
     }
-    header {
-      position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px);
-      background: rgba(11,16,32,.7); border-bottom: 1px solid rgba(255,255,255,.06);
-      padding: 14px 16px; display:flex; align-items:center; justify-content:space-between;
-    }
-    h1 { margin:0; font-size: 18px; }
-    .container { padding: 16px; max-width: 1100px; width: 100%; margin: 0 auto; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .btn { padding:10px 14px; border:0; border-radius:10px; cursor:pointer; color:#fff; transition:transform .05s ease; }
-    .btn:active { transform: translateY(1px); }
-    .start { background: var(--good); } .stop { background: var(--bad); } .add { background: var(--accent); }
-    .seg { background:#0f1a3a; border:1px solid var(--border); border-radius:10px; padding:2px; display:inline-flex; }
-    .seg button { background: transparent; border:0; color:#cfe4ff; padding:8px 10px; border-radius:8px; cursor:pointer; }
-    .seg button.active { background: #1b2a55; }
-
-    .card {
-      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02));
-      border: 1px solid var(--border); border-radius: 16px; padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25); width: 100%;
-    }
-
-    /* Responsive grids */
-    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-    .grid-3 { display: grid; grid-template-columns: 1fr; gap: 12px; }
-    @media (min-width: 900px) {
-      .grid { grid-template-columns: 1.2fr .8fr; }
-      .grid-3 { grid-template-columns: repeat(2, 1fr); }
-    }
-    @media (min-width: 1200px) {
-      .grid-3 { grid-template-columns: repeat(3, 1fr); }
-    }
-
-    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px; }
-    @media (max-width: 480px){ .kv { grid-template-columns: 1fr; } } /* stack labels on phones */
-
-    .muted { color: var(--muted); }
-    code, .chip { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
-    .chip { background: var(--chip); padding: 2px 8px; border-radius: 999px; display:inline-block; }
-    .chips { display:flex; flex-wrap:wrap; gap:6px; max-width:100%; }
-    .spinner {
-      width: 16px; height: 16px; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%;
-      animation: spin .9s linear infinite; display:inline-block; vertical-align:middle;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    table { width: 100%; border-collapse: collapse; font-size: 14px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-    thead { background: #0f1a3a; }
-    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
-    tr:last-child td { border-bottom: 0; }
-    .pnl-pos { color: var(--good); } .pnl-neg { color: var(--bad); }
-
-    /* Phone: hide less-important columns to avoid sideways scroll */
-    @media (max-width: 640px){
-      .col-worker, .col-qty, .col-note { display: none; }
-      table { font-size: 13px; }
-    }
-
-    input[type="number"] {
-      background: #0e1631; border:1px solid var(--border); border-radius:10px; color:var(--text);
-      padding:8px 10px; width:120px;
-    }
-
-    details { background: rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:8px; padding:6px 10px; }
-    summary { cursor:pointer; color: var(--accent); font-weight:600; outline:none; }
-    .toggle { display:inline-flex; align-items:center; gap:8px; }
-    .switch { position: relative; display:inline-block; width: 42px; height: 22px; }
-    .switch input { display:none; }
-    .slider { position:absolute; cursor:pointer; inset:0; background:#32406f; border-radius:999px; transition:.2s; }
-    .slider:before { content:""; position:absolute; height:18px; width:18px; left:3px; top:2px; background:white; border-radius:50%; transition:.2s; }
-    input:checked + .slider { background:#10b981; }
-    input:checked + .slider:before { transform: translateX(20px); }
+    header{position:sticky;top:0;z-index:10;backdrop-filter:blur(8px);background:rgba(11,16,32,.7);
+      border-bottom:1px solid rgba(255,255,255,.06); padding:14px 16px; display:flex; align-items:center; justify-content:space-between;}
+    h1{margin:0;font-size:18px}
+    .container{padding:16px;max-width:1100px;width:100%;margin:0 auto}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:10px 14px;border:0;border-radius:10px;cursor:pointer;color:#fff;transition:transform .05s ease}
+    .btn:active{transform:translateY(1px)}
+    .start{background:var(--good)} .stop{background:var(--bad)} .add{background:var(--accent)}
+    .seg{background:#0f1a3a;border:1px solid var(--border);border-radius:10px;padding:2px;display:inline-flex}
+    .seg button{background:transparent;border:0;color:#cfe4ff;padding:8px 10px;border-radius:8px;cursor:pointer}
+    .seg button.active{background:#1b2a55}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.02));
+      border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.25);width:100%}
+    .grid{display:grid;grid-template-columns:1fr;gap:12px}
+    .grid-3{display:grid;grid-template-columns:1fr;gap:12px}
+    @media (min-width:900px){.grid{grid-template-columns:1.2fr .8fr}.grid-3{grid-template-columns:repeat(2,1fr)}}
+    @media (min-width:1200px){.grid-3{grid-template-columns:repeat(3,1fr)}}
+    .kv{display:grid;grid-template-columns:140px 1fr;gap:6px}
+    @media (max-width:480px){.kv{grid-template-columns:1fr}}
+    .muted{color:var(--muted)}
+    code,.chip{white-space:normal;word-break:break-word;overflow-wrap:anywhere}
+    .chip{background:var(--chip);padding:2px 8px;border-radius:999px;display:inline-block}
+    .chips{display:flex;flex-wrap:wrap;gap:6px;max-width:100%}
+    .spinner{width:16px;height:16px;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .9s linear infinite;display:inline-block;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    table{width:100%;border-collapse:collapse;font-size:14px;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+    thead{background:#0f1a3a}
+    th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+    tr:last-child td{border-bottom:0}
+    .pnl-pos{color:var(--good)} .pnl-neg{color:var(--bad)}
+    @media (max-width:640px){.col-worker,.col-qty,.col-note{display:none}table{font-size:13px}}
+    input[type="number"]{background:#0e1631;border:1px solid var(--border);border-radius:10px;color:var(--text);padding:8px 10px;width:120px}
+    details{background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+    summary{cursor:pointer;color:var(--accent);font-weight:600;outline:none}
+    .toggle{display:inline-flex;align-items:center;gap:8px}
+    .switch{position:relative;display:inline-block;width:42px;height:22px}
+    .switch input{display:none}
+    .slider{position:absolute;cursor:pointer;inset:0;background:#32406f;border-radius:999px;transition:.2s}
+    .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:2px;background:white;border-radius:50%;transition:.2s}
+    input:checked + .slider{background:#10b981}
+    input:checked + .slider:before{transform:translateX(20px)}
   </style>
 </head>
 <body>
@@ -107,7 +77,7 @@
 
   <div class="container">
     <div class="grid">
-      <!-- Left: Global stats + Workers + Debug -->
+      <!-- Left -->
       <div class="card">
         <h3 style="margin:0 0 10px">Global Status</h3>
         <div class="kv" id="global">
@@ -130,25 +100,20 @@
             <details>
               <summary>View Symbols ({{ watchlist_list|length }})</summary>
               <div class="chips" style="margin-top:8px">
-                {% for sym in watchlist_list %}
-                  <span class="chip">{{ sym }}</span>
-                {% endfor %}
+                {% for sym in watchlist_list %}<span class="chip">{{ sym }}</span>{% endfor %}
               </div>
             </details>
           </div>
         </div>
 
-        <hr style="border-color: #223058; margin:12px 0">
+        <hr style="border-color:#223058;margin:12px 0">
         <h3 style="margin:0 0 10px">Worker Cards</h3>
         <div id="cards" class="grid-3"></div>
-        <div class="muted" style="margin-top:6px">
-          Cards scan concurrently. A spinner shows when scanning/buying/selling.
-        </div>
+        <div class="muted" style="margin-top:6px">Cards scan concurrently. A spinner shows when scanning/buying/selling.</div>
 
-        <!-- Debug Panel (collapsible) -->
+        <!-- Debug (collapsible) -->
         <details style="margin-top:12px" id="dbgDetails">
           <summary>Debug Panel (why buys are rejected)</summary>
-
           <div class="card" style="margin-top:10px">
             <div class="row" style="justify-content:space-between; margin-bottom:8px">
               <div class="toggle">
@@ -161,12 +126,11 @@
               <div class="row">
                 <button class="btn add" onclick="copyDebug()">Copy JSON</button>
                 <a class="btn start" href="/api/debug/export?format=csv" target="_blank" rel="noopener">Download CSV</a>
+                <a class="btn start" href="/api/debug/export?format=json" target="_blank" rel="noopener">Download JSON</a>
               </div>
             </div>
 
-            <div class="row" id="dbg-counts" style="flex-wrap:wrap; gap:6px; margin-bottom:8px">
-              <!-- chips with reason counts -->
-            </div>
+            <div class="row" id="dbg-counts" style="flex-wrap:wrap; gap:6px; margin-bottom:8px"></div>
             <div style="overflow:auto; max-width:100%; max-height:40vh">
               <table id="dbg-table">
                 <thead>
@@ -185,7 +149,7 @@
         </details>
       </div>
 
-      <!-- Right: Trade history -->
+      <!-- Right -->
       <div class="card">
         <h3 style="margin:0 0 10px">All Trade History</h3>
         <div style="overflow:auto; max-width:100%; max-height:70vh">
@@ -199,9 +163,7 @@
             <tbody id="tbody"></tbody>
           </table>
         </div>
-        <div class="muted" style="margin-top:6px">
-          Auto-refreshing every 2s (showing up to {{ recent_limit }} rows).
-        </div>
+        <div class="muted" style="margin-top:6px">Auto-refreshing every 2s (showing up to {{ recent_limit }} rows).</div>
       </div>
     </div>
   </div>
@@ -212,33 +174,23 @@
     const dbgCounts = document.getElementById('dbg-counts');
 
     function cls(v){ return (v>=0) ? 'pnl-pos' : 'pnl-neg'; }
-    function fmt(v, d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
-    async function post(url, body){
-      await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):'{}'});
-    }
-    async function addWorker(){
-      const amt = parseFloat(document.getElementById('amt').value||'20');
-      await post('/api/add-worker', {quote: amt});
-      await refresh();
-    }
-    async function stopWorker(id){
-      await post('/api/stop-worker', {worker_id:id});
-      await refresh();
-    }
+    function fmt(v,d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
+    async function post(url, body){ await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):'{}'}); }
+    async function addWorker(){ const amt=parseFloat(document.getElementById('amt').value||'20'); await post('/api/add-worker',{quote:amt}); await refresh(); }
+    async function stopWorker(id){ await post('/api/stop-worker',{worker_id:id}); await refresh(); }
     async function setMode(mode){
-      await post('/api/mode', {mode});
-      // toggle active button styling
-      document.getElementById('btnSafe').classList.toggle('active', mode==='safe');
-      document.getElementById('btnFast').classList.toggle('active', mode==='fast');
+      await post('/api/mode',{mode});
+      document.getElementById('btnSafe').classList.toggle('active',mode==='safe');
+      document.getElementById('btnFast').classList.toggle('active',mode==='fast');
       await refresh();
     }
     async function toggleDebug(enabled){
-      await fetch('/api/debug/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled})});
+      await fetch('/api/debug/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
       document.getElementById('dbgState').textContent = enabled ? 'ON' : 'OFF';
     }
     async function copyDebug(){
       try{
-        const r = await fetch('/api/debug?format=json');
+        const r = await fetch('/api/debug');       // <-- fixed: fetch the correct endpoint
         const data = await r.json();
         const txt = JSON.stringify(data.events || [], null, 2);
         await navigator.clipboard.writeText(txt);
@@ -271,39 +223,24 @@
             <div>Symbol:</div><div>${sym}</div>
             <div>Last PnL:</div><div>${pnl}</div>
             <div>Note:</div><div>${note}</div>
-          </div>
-        `;
+          </div>`;
         wrap.appendChild(card);
       });
     }
 
-    function boolBadge(ok){
-      return ok ? '<span class="chip" style="background:#11361f;color:#86efac">OK</span>'
-                : '<span class="chip" style="background:#3a0e12;color:#fca5a5">NO</span>';
-    }
+    function boolBadge(ok){ return ok ? '<span class="chip" style="background:#11361f;color:#86efac">OK</span>' : '<span class="chip" style="background:#3a0e12;color:#fca5a5">NO</span>'; }
     function renderDebugCounts(counts){
-      dbgCounts.innerHTML = '';
-      const keys = Object.keys(counts);
-      if(keys.length === 0){
-        dbgCounts.innerHTML = '<span class="muted">No data yet</span>';
-        return;
-      }
-      keys.forEach(k=>{
-        const span = document.createElement('span');
-        span.className = 'chip';
-        span.textContent = `${k}: ${counts[k]}`;
-        dbgCounts.appendChild(span);
-      });
+      dbgCounts.innerHTML=''; const keys=Object.keys(counts);
+      if(keys.length===0){ dbgCounts.innerHTML='<span class="muted">No data yet</span>'; return; }
+      keys.forEach(k=>{ const span=document.createElement('span'); span.className='chip'; span.textContent=`${k}: ${counts[k]}`; dbgCounts.appendChild(span); });
     }
     function renderDebugEvents(events){
-      dbgBody.innerHTML = '';
-      if(!events || events.length === 0){
-        const tr = document.createElement('tr');
-        const td = document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No debug events yet.';
-        tr.appendChild(td); dbgBody.appendChild(tr); return;
+      dbgBody.innerHTML='';
+      if(!events || events.length===0){
+        const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No debug events yet.'; tr.appendChild(td); dbgBody.appendChild(tr); return;
       }
       events.forEach(e=>{
-        const tr = document.createElement('tr');
+        const tr=document.createElement('tr');
         tr.innerHTML = `
           <td>${(e.time||'').replace('T',' ').replace('Z','')}</td>
           <td class="col-worker">${e.worker_id ?? ''}</td>
@@ -312,14 +249,13 @@
           <td>${boolBadge(!!e.day_ok)}</td>
           <td>${boolBadge(!!e.ema_ok)}</td>
           <td>${boolBadge(!!e.vol_ok)}</td>
-          <td class="col-note">${boolBadge(!!e.pattern_ok)}</td>
-        `;
+          <td class="col-note">${boolBadge(!!e.pattern_ok)}</td>`;
         dbgBody.appendChild(tr);
       });
     }
 
     async function refresh(){
-      try {
+      try{
         const st = await (await fetch('/api/status')).json();
         document.getElementById('modeTxt').textContent = st.mode || 'safe';
         document.getElementById('btnSafe').classList.toggle('active', st.mode==='safe');
@@ -331,22 +267,19 @@
         document.getElementById('wlt').textContent = st.watchlist_total ?? '-';
         document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':Number(st.start_net_usdt).toFixed(2));
         document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':Number(st.current_net_usdt).toFixed(2));
-        const pusd = st.profit_usd, ppct = st.profit_pct;
+        const pusd=st.profit_usd, ppct=st.profit_pct;
         document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${Number(pusd).toFixed(2)} USDT`);
         document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${Number(ppct).toFixed(2)}%`);
-        renderWorkers(st.workers || []);
-      } catch(e){}
-      try {
+        renderWorkers(st.workers||[]);
+      }catch(e){}
+      try{
         const data = await (await fetch('/api/trades')).json();
-        const rows = data.rows || [];
-        tbody.innerHTML = '';
+        const rows = data.rows || []; tbody.innerHTML='';
         if(rows.length===0){
-          const tr = document.createElement('tr'); const td = document.createElement('td');
-          td.colSpan=8; td.className='muted'; td.textContent='No trades yet.'; tr.appendChild(td); tbody.appendChild(tr);
-        } else {
+          const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No trades yet.'; tr.appendChild(td); tbody.appendChild(tr);
+        }else{
           rows.forEach(r=>{
-            const tr = document.createElement('tr');
-            const pnl = parseFloat(r.pnl_pct||'');
+            const tr=document.createElement('tr'); const pnl=parseFloat(r.pnl_pct||'');
             tr.innerHTML = `
               <td>${r.time}</td>
               <td class="col-worker">${r.worker_id||''}</td>
@@ -359,7 +292,7 @@
             tbody.appendChild(tr);
           });
         }
-      } catch(e){}
+      }catch(e){}
     }
 
     async function refreshDebug(){
@@ -375,7 +308,6 @@
 
     setInterval(refresh, 2000);
     setInterval(refreshDebug, 2000);
-    // auto start core on first load (remove if you prefer manual)
     post('/api/start-core').then(()=>{ refresh(); refreshDebug(); });
   </script>
 </body>
