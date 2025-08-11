@@ -1,0 +1,246 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fast-Cycle Bot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0b1020; --card: #111831; --muted:#9aa4b2; --text:#e8ecf1;
+      --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058;
+      --warn:#f59e0b;
+    }
+    * { box-sizing: border-box; }
+    html, body { max-width: 100%; overflow-x: hidden; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, #162042 0%, var(--bg) 40%);
+      color: var(--text); margin: 0;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      backdrop-filter: blur(8px);
+      background: rgba(11,16,32,.7);
+      border-bottom: 1px solid rgba(255,255,255,.06);
+      padding: 14px 22px; display:flex; align-items:center; justify-content:space-between;
+    }
+    h1 { margin:0; font-size: 20px; }
+    .container { padding: 22px; max-width: 1200px; width: 100%; margin: 0 auto; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .btn {
+      padding:10px 16px; border:0; border-radius:10px; cursor:pointer; color:#fff; transition:transform .05s ease;
+    }
+    .btn:active { transform: translateY(1px); }
+    .start { background: var(--good); }
+    .stop  { background: var(--bad); }
+    .add   { background: var(--accent); }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02));
+      border: 1px solid var(--border);
+      border-radius: 16px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      width: 100%;
+    }
+
+    /* Responsive grids */
+    .grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr; gap: 18px; }
+    @media (min-width: 900px) {
+      .grid { grid-template-columns: 1.2fr .8fr; }
+      .grid-3 { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (min-width: 1200px) {
+      .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    .kv { display: grid; grid-template-columns: 180px 1fr; gap: 8px; }
+    .muted { color: var(--muted); }
+    code, .chip { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
+    .chip { background: var(--chip); padding: 2px 8px; border-radius: 999px; display:inline-block; }
+    .chips { display:flex; flex-wrap:wrap; gap:6px; max-width:100%; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    thead { background: #0f1a3a; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: 0; }
+    .pnl-pos { color: var(--good); }
+    .pnl-neg { color: var(--bad); }
+
+    .spinner {
+      width: 18px; height: 18px; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%;
+      animation: spin .9s linear infinite; display:inline-block; vertical-align:middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .warn { color: var(--warn); }
+    input[type="number"] {
+      background: #0e1631; border:1px solid var(--border); border-radius:10px; color:var(--text);
+      padding:8px 10px; width:130px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⚡ Fast-Cycle Bot</h1>
+    <div class="row">
+      <button class="btn start" onclick="post('/api/start-core')">Start Core</button>
+      <button class="btn stop"  onclick="post('/api/stop-core')">Stop Core</button>
+      <div class="row">
+        <input type="number" id="amt" min="10" step="1" value="20" />
+        <button class="btn add" onclick="addWorker()">Add Card</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="grid">
+      <!-- Left: Global stats + Workers -->
+      <div class="card">
+        <h3 style="margin:0 0 12px">Global Status</h3>
+        <div class="kv" id="global">
+          <div>Watchlist:</div>
+          <div>Valid <span id="wlc">-</span> <span class="muted">(filtered from <span id="wlt">-</span>)</span></div>
+
+          <div>Start Net (USDT):</div><div id="startv">-</div>
+          <div>Current Net (USDT):</div><div id="curv">-</div>
+
+          <div>Profit:</div>
+          <div><span id="p_usd">-</span> <span class="muted">(<span id="p_pct">-</span>)</span></div>
+
+          <div>Buy Filters:</div>
+          <div><code>DayMove≥{{ min_day_vol }}%, Pullback≥{{ pullback_req }}%, VolSpike≥{{ vol_mult }}×</code></div>
+
+          <div>Exit Rules:</div>
+          <div><code>TP Trigger {{ tp_trigger_pct }}% → Trail {{ trail_pct }}% | SL {{ sl_pct }}% | Time {{ time_limit }}m</code></div>
+
+          <div>Watchlist Symbols:</div>
+<div>
+  <details style="background: var(--chip); border-radius:8px; padding:4px 8px; max-width:100%">
+    <summary style="cursor:pointer; color:var(--accent); font-weight:500">View Symbols ({{ watchlist_list|length }})</summary>
+    <div class="chips" style="margin-top:8px">
+      {% for sym in watchlist_list %}
+        <span class="chip">{{ sym }}</span>
+      {% endfor %}
+    </div>
+  </details>
+</div>
+        </div>
+
+        <hr style="border-color: #223058; margin:16px 0">
+        <h3 style="margin:0 0 12px">Worker Cards</h3>
+        <div id="cards" class="grid-3"></div>
+        <div class="muted" style="margin-top:8px">
+          Cards scan concurrently. A spinner shows when scanning/buying/selling.
+        </div>
+      </div>
+
+      <!-- Right: Trade history -->
+      <div class="card">
+        <h3 style="margin:0 0 12px">All Trade History</h3>
+        <div style="overflow:auto; max-width:100%; max-height:70vh">
+          <table id="trades">
+            <thead>
+              <tr><th>Time (UTC)</th><th>Worker</th><th>Symbol</th><th>Action</th><th>Price</th><th>Qty</th><th>PnL %</th><th>Note</th></tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+        <div class="muted" style="margin-top:8px">
+          Auto-refreshing every 2s (showing up to {{ recent_limit }} rows).
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const tbody = document.getElementById('tbody');
+    function cls(v){ return (v>=0) ? 'pnl-pos' : 'pnl-neg'; }
+    function fmt(v, d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
+    async function post(url, body){
+      await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):'{}'});
+    }
+    async function addWorker(){
+      const amt = parseFloat(document.getElementById('amt').value||'20');
+      await post('/api/add-worker', {quote: amt});
+      await refresh();
+    }
+    async function stopWorker(id){
+      await post('/api/stop-worker', {worker_id:id});
+      await refresh();
+    }
+
+    function renderWorkers(workers){
+      const wrap = document.getElementById('cards');
+      wrap.innerHTML = '';
+      if(!workers || !workers.length){
+        wrap.innerHTML = '<div class="muted">No cards yet. Add one with an amount and it will start scanning.</div>';
+        return;
+      }
+      workers.forEach(w=>{
+        const scanning = (w.status==='scanning'||w.status==='buying'||w.status==='selling');
+        const pnl = (w.last_pnl==null) ? '-' : (Number(w.last_pnl).toFixed(3)+'%');
+        const sym = w.symbol || '-';
+        const note = w.note || '-';
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div class="row" style="justify-content:space-between; margin-bottom:8px">
+            <div><strong>Card #${w.id}</strong> • <span class="muted">${(w.updated||'').replace('T',' ').replace('Z','')}</span></div>
+            <button class="btn stop" onclick="stopWorker(${w.id})">Stop</button>
+          </div>
+          <div class="kv">
+            <div>Amount:</div><div><code>${fmt(w.quote,2)} USDT</code></div>
+            <div>Status:</div><div>${scanning?'<span class="spinner"></span> ':''}<span>${w.status}</span></div>
+            <div>Symbol:</div><div>${sym}</div>
+            <div>Last PnL:</div><div>${pnl}</div>
+            <div>Note:</div><div>${note}</div>
+          </div>
+        `;
+        wrap.appendChild(card);
+      });
+    }
+
+    async function refresh(){
+      try {
+        const st = await (await fetch('/api/status')).json();
+        // global
+        document.getElementById('wlc').textContent = st.watchlist_count ?? '-';
+        document.getElementById('wlt').textContent = st.watchlist_total ?? '-';
+        document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':fmt(st.start_net_usdt,2));
+        document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':fmt(st.current_net_usdt,2));
+        const pusd = st.profit_usd, ppct = st.profit_pct;
+        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${fmt(pusd,2)} USDT`);
+        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${fmt(ppct,2)}%`);
+        renderWorkers(st.workers || []);
+      } catch(e){}
+      try {
+        const data = await (await fetch('/api/trades')).json();
+        const rows = data.rows || [];
+        tbody.innerHTML = '';
+        if(rows.length===0){
+          const tr = document.createElement('tr'); const td = document.createElement('td');
+          td.colSpan=8; td.className='muted'; td.textContent='No trades yet.'; tr.appendChild(td); tbody.appendChild(tr);
+        } else {
+          rows.forEach(r=>{
+            const tr = document.createElement('tr');
+            const pnl = parseFloat(r.pnl_pct||'');
+            tr.innerHTML = `
+              <td>${r.time}</td>
+              <td>${r.worker_id||''}</td>
+              <td>${r.symbol}</td>
+              <td><span class="chip">${r.action}</span></td>
+              <td>${r.price}</td>
+              <td>${r.qty}</td>
+              <td class="${isNaN(pnl)?'':cls(pnl)}">${r.pnl_pct||''}</td>
+              <td>${r.note||''}</td>`;
+            tbody.appendChild(tr);
+          });
+        }
+      } catch(e){}
+    }
+
+    setInterval(refresh, 2000);
+    // auto start core on first load (remove if you prefer manual)
+    post('/api/start-core').then(refresh);
+  </script>
+</body>
+</html>
