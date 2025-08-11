@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Fast-cycle Binance bot + Flask dashboard (multi-card + debug + mobile UI)
+Fast-cycle Binance bot + Flask dashboard (modes + debug + mobile)
 - Multiple concurrent workers ("cards"), each with its own quote amount
 - Prevent duplicate positions per symbol
 - Auto-filter watchlist per exchange (Testnet/Live)
-- Loosened buy filters (faster testing)
-- Global PnL in $ and % using net account value (USDT + assets valued in USDT)
-- Full trade history + Debug panel (why buys were rejected)
+- Two modes: SAFE / FAST (both keep 1% drop threshold for buys)
+- Global PnL in $ and % using net account value (USDT + assets in USDT)
+- Full trade history + Debug panel (toggle, collapsible, export CSV/JSON, copy to clipboard)
 
 Env (.env locally or Railway Variables):
   BINANCE_API_KEY=...
   BINANCE_API_SECRET=...
   BINANCE_TESTNET=true
   PORT=8080
+  # Optional on Railway for persistence:
+  # LOG_FILE=/data/fast_cycle_trades.csv
 
 Run locally:
   py -m pip install flask gunicorn python-binance python-dotenv
@@ -22,7 +24,7 @@ import os, time, csv, math, threading, sys
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from typing import Dict
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 from dotenv import load_dotenv
 from binance.client import Client
 
@@ -52,24 +54,22 @@ KLIMIT = 120
 
 MAX_TRADE_MINUTES = 45
 STOP_LOSS_PCT = 0.015
-TP_TRIGGER_PCT = 0.010
-TRAIL_GIVEBACK_PCT = 0.004
+TP_TRIGGER_PCT = 0.010          # trailing arms at +1.0%
+TRAIL_GIVEBACK_PCT = 0.004      # 0.4% giveback
 
-# Loosened buy filters for testing
-MIN_DAY_VOLATILITY_PCT = 0.5        # % 24h range requirement
-MICRO_PULLBACK_DROP_PCT = 0.001     # % dip in prev candle
-VOLUME_SPIKE_MULT = 1.1             # last vol vs avg10
+# Buy filters (base)
+MIN_DAY_VOLATILITY_PCT = 0.5    # minimum 24h range to consider
+DROP_PCT = 0.01                 # *** 1% drop threshold in BOTH modes (as requested) ***
 COOLDOWN_MINUTES = 8
 
 POLL_SECONDS_IDLE = 2
 POLL_SECONDS_ACTIVE = 2
 
 LOG_FILE = os.getenv("LOG_FILE", "fast_cycle_trades.csv")
-RECENT_TRADES_LIMIT = 300  # returned to UI
+RECENT_TRADES_LIMIT = 500  # returned to UI
 
-# Debug
-DEBUG_MODE = True
-DEBUG_BUFFER = 300  # how many recent rejections to remember
+# Debug (runtime toggle)
+DEBUG_BUFFER = 500  # how many recent rejections to remember
 
 # =========================
 # Helpers
@@ -195,15 +195,36 @@ def get_net_usdt_value(client) -> float:
     return total
 
 # =========================
-# Signals (with debug flags)
+# Policy & Signals
 # =========================
-def evaluate_buy_checks(client, symbol, cache):
+def make_policy(mode:str):
     """
-    Evaluate all buy filters and return granular flags + reason.
+    Both modes keep DROP_PCT = 1%.
+    SAFE: stricter EMA & volume
+    FAST: lighter EMA & volume (still with 1% drop)
+    """
+    if mode == "fast":
+        return {
+            "drop_pct": DROP_PCT,     # 1% drop (as requested)
+            "ema_relax": 0.997,       # allow price >= 99.7% of EMA50
+            "vol_mult": 1.0,          # no spike required (>= avg)
+            "min_day_vol": MIN_DAY_VOLATILITY_PCT
+        }
+    else:  # safe
+        return {
+            "drop_pct": DROP_PCT,     # 1% drop
+            "ema_relax": 1.0,         # strictly above EMA50
+            "vol_mult": 1.2,          # small spike
+            "min_day_vol": MIN_DAY_VOLATILITY_PCT
+        }
+
+def evaluate_buy_checks(client, symbol, cache, policy):
+    """
+    Evaluate buy filters and return granular flags + reason.
     """
     # 24h volatility
     _, day_move = get_24h_stats(client, symbol)
-    day_ok = day_move >= MIN_DAY_VOLATILITY_PCT
+    day_ok = day_move >= policy["min_day_vol"]
 
     # candles
     candles = cache.get(symbol)
@@ -216,25 +237,25 @@ def evaluate_buy_checks(client, symbol, cache):
     closes = [c["close"] for c in candles]
     vols   = [c["volume"] for c in candles]
 
-    # trend
+    # trend (EMA50 with mode-based relaxation)
     ema50  = ema(closes[-60:], 50)
-    ema_ok = (ema50 is not None) and (closes[-1] > ema50)
+    ema_ok = (ema50 is not None) and (closes[-1] >= ema50 * policy["ema_relax"])
 
-    # volume spike
+    # volume
     vol_ok = False
     if len(vols) >= 11:
         avg10 = sum(vols[-11:-1]) / 10.0
-        vol_ok = (avg10 > 0) and (vols[-1] >= VOLUME_SPIKE_MULT * avg10)
+        vol_ok = (avg10 > 0) and (vols[-1] >= policy["vol_mult"] * avg10)
 
-    # micro pullback + recovery
+    # micro pullback (1% drop) + recovery
     pattern_ok = False
     if len(candles) >= 2:
         c_prev = candles[-2]; c_last = candles[-1]
-        dipped = (c_prev["close"] - c_prev["low"]) / max(c_prev["close"], 1e-12) >= MICRO_PULLBACK_DROP_PCT
+        dipped = (c_prev["close"] - c_prev["low"]) / max(c_prev["close"], 1e-12) >= policy["drop_pct"]
         recovered = c_last["close"] > c_prev["high"]
         pattern_ok = dipped and recovered
 
-    # determine first failing reason
+    # first failing reason
     if not day_ok:      reason = "low_24h_move"
     elif not ema_ok:    reason = "below_ema50"
     elif not vol_ok:    reason = "no_vol_spike"
@@ -319,8 +340,12 @@ class FastCycleBot:
         self._metrics_thread = None
         self._metrics_stop = threading.Event()
 
-        # debug events
+        # debug events (runtime toggle)
+        self.debug_enabled = True
         self._debug_events = deque(maxlen=DEBUG_BUFFER)
+
+        # mode
+        self.mode = "safe"  # "safe" or "fast"
 
     # ---- lifecycle ----
     def start_core(self):
@@ -349,7 +374,6 @@ class FastCycleBot:
         self._running = True
 
     def stop_core(self):
-        # stop all workers
         for wid, ev in list(self._stop_flags.items()):
             ev.set()
         self._workers.clear()
@@ -370,7 +394,7 @@ class FastCycleBot:
 
     # ---- debug helper ----
     def _debug_push(self, symbol, wid, flags):
-        if not DEBUG_MODE or not flags:
+        if not self.debug_enabled or not flags:
             return
         self._debug_events.append({
             "time": now_utc().isoformat(),
@@ -420,6 +444,8 @@ class FastCycleBot:
         client = self._client
         while not stop_ev.is_set():
             try:
+                policy = make_policy(self.mode)
+
                 # SCAN
                 self._update_state(wid, status="scanning", symbol=None, note="Scanning watchlist…")
                 picked = None
@@ -427,7 +453,7 @@ class FastCycleBot:
                     if stop_ev.is_set(): break
                     if not self._eligible_symbol(sym):
                         continue
-                    flags = evaluate_buy_checks(client, sym, self._candles_cache)
+                    flags = evaluate_buy_checks(client, sym, self._candles_cache, policy)
                     if flags["ok"]:
                         picked = (sym, flags["reason"])
                         break
@@ -547,7 +573,9 @@ class FastCycleBot:
             "current_net_usdt": cur_val,
             "profit_usd": profit_usd,
             "profit_pct": profit_pct,
-            "workers": workers
+            "workers": workers,
+            "mode": self.mode,
+            "debug_enabled": self.debug_enabled
         }
 
 # =========================
@@ -571,8 +599,7 @@ def dashboard():
         sl_pct=STOP_LOSS_PCT*100,
         time_limit=MAX_TRADE_MINUTES,
         min_day_vol=MIN_DAY_VOLATILITY_PCT,
-        pullback_req=MICRO_PULLBACK_DROP_PCT*100,
-        vol_mult=VOLUME_SPIKE_MULT,
+        drop_pct=DROP_PCT*100,
         recent_limit=RECENT_TRADES_LIMIT
     )
 
@@ -584,17 +611,55 @@ def api_status():
 def api_trades():
     return jsonify({"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
 
+# ---- Debug API ----
 @app.get("/api/debug")
 def api_debug():
-    events = list(bot._debug_events)[-100:]
+    events = list(bot._debug_events)[-200:]  # send last 200
     counts = defaultdict(int)
     for e in events:
         counts[e["reason"]] += 1
     return jsonify({
+        "enabled": bot.debug_enabled,
         "events": events[::-1],
         "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
     })
 
+@app.post("/api/debug/toggle")
+def api_debug_toggle():
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    bot.debug_enabled = enabled
+    return jsonify({"ok": True, "enabled": bot.debug_enabled})
+
+@app.get("/api/debug/export")
+def api_debug_export():
+    fmt = request.args.get("format", "csv").lower()
+    events = list(bot._debug_events)
+    if fmt == "json":
+        from json import dumps
+        return Response(dumps(events, ensure_ascii=False, indent=2), mimetype="application/json")
+    # CSV
+    headers = ["time","worker_id","symbol","reason","day_ok","ema_ok","vol_ok","pattern_ok"]
+    def gen():
+        yield ",".join(headers) + "\n"
+        for e in events:
+            row = [str(e.get(h,"")) for h in headers]
+            # escape commas minimally
+            yield ",".join(row) + "\n"
+    return Response(gen(), mimetype="text/csv",
+                    headers={"Content-Disposition":"attachment; filename=debug_events.csv"})
+
+# ---- Mode API ----
+@app.post("/api/mode")
+def api_mode():
+    data = request.get_json(force=True, silent=True) or {}
+    mode = str(data.get("mode","safe")).lower()
+    if mode not in ("safe","fast"):
+        return jsonify({"ok":False,"error":"mode must be 'safe' or 'fast'"}), 400
+    bot.mode = mode
+    return jsonify({"ok":True,"mode":bot.mode})
+
+# ---- Core & Workers ----
 @app.post("/api/start-core")
 def api_start_core():
     bot.start_core()
@@ -623,4 +688,3 @@ if __name__ == "__main__":
     load_dotenv()
     port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False)
-    
