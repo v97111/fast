@@ -27,6 +27,10 @@
     .btn { padding:10px 14px; border:0; border-radius:10px; cursor:pointer; color:#fff; transition:transform .05s ease; }
     .btn:active { transform: translateY(1px); }
     .start { background: var(--good); } .stop { background: var(--bad); } .add { background: var(--accent); }
+    .seg { background:#0f1a3a; border:1px solid var(--border); border-radius:10px; padding:2px; display:inline-flex; }
+    .seg button { background: transparent; border:0; color:#cfe4ff; padding:8px 10px; border-radius:8px; cursor:pointer; }
+    .seg button.active { background: #1b2a55; }
+
     .card {
       background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.02));
       border: 1px solid var(--border); border-radius: 16px; padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25); width: 100%;
@@ -74,13 +78,24 @@
     }
 
     details { background: rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:8px; padding:6px 10px; }
-    summary { cursor:pointer; color: var(--accent); font-weight:600; }
+    summary { cursor:pointer; color: var(--accent); font-weight:600; outline:none; }
+    .toggle { display:inline-flex; align-items:center; gap:8px; }
+    .switch { position: relative; display:inline-block; width: 42px; height: 22px; }
+    .switch input { display:none; }
+    .slider { position:absolute; cursor:pointer; inset:0; background:#32406f; border-radius:999px; transition:.2s; }
+    .slider:before { content:""; position:absolute; height:18px; width:18px; left:3px; top:2px; background:white; border-radius:50%; transition:.2s; }
+    input:checked + .slider { background:#10b981; }
+    input:checked + .slider:before { transform: translateX(20px); }
   </style>
 </head>
 <body>
   <header>
     <h1>⚡ Fast-Cycle Bot</h1>
     <div class="row">
+      <div class="seg" id="modeSeg">
+        <button id="btnSafe" class="active" onclick="setMode('safe')">Safe</button>
+        <button id="btnFast" onclick="setMode('fast')">Fast</button>
+      </div>
       <button class="btn start" onclick="post('/api/start-core')">Start Core</button>
       <button class="btn stop"  onclick="post('/api/stop-core')">Stop Core</button>
       <div class="row">
@@ -92,10 +107,12 @@
 
   <div class="container">
     <div class="grid">
-      <!-- Left: Global stats + Workers -->
+      <!-- Left: Global stats + Workers + Debug -->
       <div class="card">
         <h3 style="margin:0 0 10px">Global Status</h3>
         <div class="kv" id="global">
+          <div>Mode:</div><div><span id="modeTxt">safe</span> <span class="muted">(drop {{ drop_pct }}%)</span></div>
+
           <div>Watchlist:</div>
           <div>Valid <span id="wlc">-</span> <span class="muted">(from <span id="wlt">-</span>)</span></div>
 
@@ -104,9 +121,6 @@
 
           <div>Profit:</div>
           <div><span id="p_usd">-</span> <span class="muted">(<span id="p_pct">-</span>)</span></div>
-
-          <div>Buy Filters:</div>
-          <div><code>DayMove≥{{ min_day_vol }}%, Pullback≥{{ pullback_req }}%, VolSpike≥{{ vol_mult }}×</code></div>
 
           <div>Exit Rules:</div>
           <div><code>TP {{ tp_trigger_pct }}% → Trail {{ trail_pct }}% | SL {{ sl_pct }}% | Time {{ time_limit }}m</code></div>
@@ -131,27 +145,44 @@
           Cards scan concurrently. A spinner shows when scanning/buying/selling.
         </div>
 
-        <!-- Debug Panel -->
-        <div class="card" style="margin-top:12px">
-          <h3 style="margin:0 0 10px">Debug: Why buys are rejected</h3>
-          <div class="row" id="dbg-counts" style="flex-wrap:wrap; gap:6px; margin-bottom:8px">
-            <!-- chips with reason counts -->
+        <!-- Debug Panel (collapsible) -->
+        <details style="margin-top:12px" id="dbgDetails">
+          <summary>Debug Panel (why buys are rejected)</summary>
+
+          <div class="card" style="margin-top:10px">
+            <div class="row" style="justify-content:space-between; margin-bottom:8px">
+              <div class="toggle">
+                <label class="switch">
+                  <input type="checkbox" id="dbgToggle" checked onchange="toggleDebug(this.checked)">
+                  <span class="slider"></span>
+                </label>
+                <span>Debug: <strong id="dbgState">ON</strong></span>
+              </div>
+              <div class="row">
+                <button class="btn add" onclick="copyDebug()">Copy JSON</button>
+                <a class="btn start" href="/api/debug/export?format=csv" target="_blank" rel="noopener">Download CSV</a>
+              </div>
+            </div>
+
+            <div class="row" id="dbg-counts" style="flex-wrap:wrap; gap:6px; margin-bottom:8px">
+              <!-- chips with reason counts -->
+            </div>
+            <div style="overflow:auto; max-width:100%; max-height:40vh">
+              <table id="dbg-table">
+                <thead>
+                  <tr>
+                    <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Reason</th>
+                    <th>24h</th><th>EMA</th><th>Vol</th><th class="col-note">Pattern</th>
+                  </tr>
+                </thead>
+                <tbody id="dbg-body">
+                  <tr><td colspan="8" class="muted">Collecting rejections…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="muted" style="margin-top:6px">Updates every 2s. Turning debug OFF stops recording new events.</div>
           </div>
-          <div style="overflow:auto; max-width:100%; max-height:40vh">
-            <table id="dbg-table">
-              <thead>
-                <tr>
-                  <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Reason</th>
-                  <th>24h</th><th>EMA</th><th>Vol</th><th class="col-note">Pattern</th>
-                </tr>
-              </thead>
-              <tbody id="dbg-body">
-                <tr><td colspan="8" class="muted">Collecting rejections…</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="muted" style="margin-top:6px">Updates every 2s. Toggle DEBUG_MODE in code to disable.</div>
-        </div>
+        </details>
       </div>
 
       <!-- Right: Trade history -->
@@ -193,6 +224,26 @@
     async function stopWorker(id){
       await post('/api/stop-worker', {worker_id:id});
       await refresh();
+    }
+    async function setMode(mode){
+      await post('/api/mode', {mode});
+      // toggle active button styling
+      document.getElementById('btnSafe').classList.toggle('active', mode==='safe');
+      document.getElementById('btnFast').classList.toggle('active', mode==='fast');
+      await refresh();
+    }
+    async function toggleDebug(enabled){
+      await fetch('/api/debug/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled})});
+      document.getElementById('dbgState').textContent = enabled ? 'ON' : 'OFF';
+    }
+    async function copyDebug(){
+      try{
+        const r = await fetch('/api/debug?format=json');
+        const data = await r.json();
+        const txt = JSON.stringify(data.events || [], null, 2);
+        await navigator.clipboard.writeText(txt);
+        alert('Debug JSON copied to clipboard!');
+      }catch(e){ alert('Copy failed'); }
     }
 
     function renderWorkers(workers){
@@ -270,13 +321,19 @@
     async function refresh(){
       try {
         const st = await (await fetch('/api/status')).json();
+        document.getElementById('modeTxt').textContent = st.mode || 'safe';
+        document.getElementById('btnSafe').classList.toggle('active', st.mode==='safe');
+        document.getElementById('btnFast').classList.toggle('active', st.mode==='fast');
+        document.getElementById('dbgToggle').checked = !!st.debug_enabled;
+        document.getElementById('dbgState').textContent = st.debug_enabled ? 'ON' : 'OFF';
+
         document.getElementById('wlc').textContent = st.watchlist_count ?? '-';
         document.getElementById('wlt').textContent = st.watchlist_total ?? '-';
-        document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':fmt(st.start_net_usdt,2));
-        document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':fmt(st.current_net_usdt,2));
+        document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':Number(st.start_net_usdt).toFixed(2));
+        document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':Number(st.current_net_usdt).toFixed(2));
         const pusd = st.profit_usd, ppct = st.profit_pct;
-        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${fmt(pusd,2)} USDT`);
-        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${fmt(ppct,2)}%`);
+        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${Number(pusd).toFixed(2)} USDT`);
+        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${Number(ppct).toFixed(2)}%`);
         renderWorkers(st.workers || []);
       } catch(e){}
       try {
@@ -309,6 +366,8 @@
       try{
         const r = await fetch('/api/debug');
         const data = await r.json();
+        document.getElementById('dbgToggle').checked = !!data.enabled;
+        document.getElementById('dbgState').textContent = data.enabled ? 'ON' : 'OFF';
         renderDebugCounts(data.counts || {});
         renderDebugEvents(data.events || []);
       }catch(e){}
