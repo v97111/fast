@@ -54,6 +54,7 @@
     .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:2px;background:white;border-radius:50%;transition:.2s}
     input:checked + .slider{background:#10b981}
     input:checked + .slider:before{transform:translateX(20px)}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
   </style>
 </head>
 <body>
@@ -206,18 +207,50 @@
         const pnl = (w.last_pnl==null) ? '-' : (Number(w.last_pnl).toFixed(3)+'%');
         const sym = w.symbol || '-';
         const note = w.note || '-';
+
+        // live PnL
+        const uPct = (w.unreal_pct==null) ? '-' : `${Number(w.unreal_pct).toFixed(3)}%`;
+        const uUsd = (w.unreal_usd==null) ? '-' : `${(w.unreal_usd>=0?'+':'')+Number(w.unreal_usd).toFixed(3)} USDT`;
+        const curP = (w.cur_price==null) ? '-' : Number(w.cur_price).toFixed(6);
+        const entP = (w.entry_price==null) ? '-' : Number(w.entry_price).toFixed(6);
+
+        const tpP   = (w.tp_price==null) ? '-' : Number(w.tp_price).toFixed(6);
+        const taP   = (w.trail_arm_price==null) ? '-' : Number(w.trail_arm_price).toFixed(6);
+        const slP   = (w.sl_price==null) ? '-' : Number(w.sl_price).toFixed(6);
+
+        // time in trade
+        const started = w.started ? new Date(w.started) : null;
+        let heldTxt = '-';
+        if(started){
+          const secs = Math.max(0, Math.floor((Date.now() - started.getTime())/1000));
+          const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = secs%60;
+          heldTxt = `${h>0?String(h).padStart(2,'0')+':':''}${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+        }
+
         const card = document.createElement('div');
         card.className = 'card';
         card.innerHTML = `
           <div class="row" style="justify-content:space-between; margin-bottom:6px">
-            <div><strong>Card #${w.id}</strong> • <span class="muted">${(w.updated||'').replace('T',' ').replace('Z','')}</span></div>
+            <div><strong>Card #${w.id}</strong> • <span class="muted mono">${(w.updated||'').replace('T',' ').replace('Z','')}</span></div>
             <button class="btn stop" onclick="stopWorker(${w.id})">Stop</button>
           </div>
-          <div class="kv">
-            <div>Amount:</div><div><code>${fmt(w.quote,2)} USDT</code></div>
+          <div class="kv mono">
+            <div>Amount:</div><div>${fmt(w.quote,2)} USDT</div>
             <div>Status:</div><div>${scanning?'<span class="spinner"></span> ':''}<span>${w.status}</span></div>
             <div>Symbol:</div><div>${sym}</div>
-            <div>Last PnL:</div><div>${pnl}</div>
+
+            <div>Entry Price:</div><div>${entP}</div>
+            <div>Current Price:</div><div>${curP}</div>
+
+            <div>Unrealized:</div>
+            <div><span class="${(w.unreal_pct==null)?'':(w.unreal_pct>=0?'pnl-pos':'pnl-neg')}">${uPct}</span> <span class="muted">(${uUsd})</span></div>
+
+            <div>Targets:</div>
+            <div>TP ${tpP} • TrailArm ${taP} • SL ${slP}</div>
+
+            <div>Time in Trade:</div><div>${heldTxt}</div>
+
+            <div>Last PnL (realized):</div><div>${pnl}</div>
             <div>Note:</div><div>${note}</div>
           </div>`;
         wrap.appendChild(card);
@@ -284,7 +317,7 @@
               <td><span class="chip">${r.action}</span></td>
               <td>${r.price}</td>
               <td class="col-qty">${r.qty}</td>
-              <td class="${isNaN(pnl)?'':cls(pnl)}">${r.pnl_pct||''}</td>
+              <td class="${isNaN(pnl)?'':(pnl>=0?'pnl-pos':'pnl-neg')}">${r.pnl_pct||''}</td>
               <td class="col-note">${r.note||''}</td>`;
             tbody.appendChild(tr);
           });
