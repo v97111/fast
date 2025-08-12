@@ -226,8 +226,8 @@ def evaluate_buy_checks(client, symbol, cache, policy):
         if len(candles) >= 3:
             last = candles[-2]; prev = candles[-3]
             pattern_ok = last["close"] > prev["close"]
-    elif policy["pattern"] == "none":
-    pattern_ok = True
+        pattern_ok
+    
 
     # Reason
     if not day_ok:      reason = "low_24h_move"
