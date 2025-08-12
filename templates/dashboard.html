@@ -1,344 +1,206 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Fast-Cycle Bot</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root {
-      --bg:#0b1020; --card:#111831; --muted:#9aa4b2; --text:#e8ecf1;
-      --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058;
-    }
-    *{box-sizing:border-box}
-    html,body{max-width:100%;overflow-x:hidden}
-    body{
-      font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial,sans-serif;
-      background:radial-gradient(1200px 600px at 20% -10%,#162042 0%,var(--bg) 40%); color:var(--text); margin:0;
-    }
-    header{position:sticky;top:0;z-index:10;backdrop-filter:blur(8px);background:rgba(11,16,32,.7);
-      border-bottom:1px solid rgba(255,255,255,.06); padding:14px 16px; display:flex; align-items:center; justify-content:space-between;}
-    h1{margin:0;font-size:18px}
-    .container{padding:16px;max-width:1100px;width:100%;margin:0 auto}
-    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .btn{padding:10px 14px;border:0;border-radius:10px;cursor:pointer;color:#fff;transition:transform .05s ease}
-    .btn:active{transform:translateY(1px)}
-    .start{background:var(--good)} .stop{background:var(--bad)} .add{background:var(--accent)}
-    .seg{background:#0f1a3a;border:1px solid var(--border);border-radius:10px;padding:2px;display:inline-flex}
-    .seg button{background:transparent;border:0;color:#cfe4ff;padding:8px 10px;border-radius:8px;cursor:pointer}
-    .seg button.active{background:#1b2a55}
-    .card{background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.02));
-      border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.25);width:100%}
-    .grid{display:grid;grid-template-columns:1fr;gap:12px}
-    .grid-3{display:grid;grid-template-columns:1fr;gap:12px}
-    @media (min-width:900px){.grid{grid-template-columns:1.2fr .8fr}.grid-3{grid-template-columns:repeat(2,1fr)}}
-    @media (min-width:1200px){.grid-3{grid-template-columns:repeat(3,1fr)}}
-    .kv{display:grid;grid-template-columns:140px 1fr;gap:6px}
-    @media (max-width:480px){.kv{grid-template-columns:1fr}}
-    .muted{color:var(--muted)}
-    .chip{background:var(--chip);padding:2px 8px;border-radius:999px;display:inline-block;white-space:normal;overflow-wrap:anywhere}
-    .chips{display:flex;flex-wrap:wrap;gap:6px;max-width:100%}
-    .spinner{width:16px;height:16px;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .9s linear infinite;display:inline-block;vertical-align:middle}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    table{width:100%;border-collapse:collapse;font-size:14px;border:1px solid var(--border);border-radius:12px;overflow:hidden}
-    thead{background:#0f1a3a}
-    th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
-    tr:last-child td{border-bottom:0}
-    .pnl-pos{color:var(--good)} .pnl-neg{color:var(--bad)}
-    @media (max-width:640px){.col-worker,.col-qty,.col-note{display:none}table{font-size:13px}}
-    input[type="number"]{background:#0e1631;border:1px solid var(--border);border-radius:10px;color:var(--text);padding:8px 10px;width:120px}
-    details{background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
-    summary{cursor:pointer;color:var(--accent);font-weight:600;outline:none}
-    .switch{position:relative;display:inline-block;width:42px;height:22px}
-    .switch input{display:none}
-    .slider{position:absolute;cursor:pointer;inset:0;background:#32406f;border-radius:999px;transition:.2s}
-    .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:2px;background:white;border-radius:50%;transition:.2s}
-    input:checked + .slider{background:#10b981}
-    input:checked + .slider:before{transform:translateX(20px)}
-    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fast-Cycle Bot Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .card { @apply bg-slate-800/70 rounded-2xl p-4 shadow-lg border border-slate-700; }
+  .badge { @apply text-xs px-2 py-1 rounded-full bg-slate-700 text-slate-200; }
+  .btn  { @apply px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50; }
+  .btn-red { @apply bg-rose-600 hover:bg-rose-500; }
+  .spinner { width:16px; height:16px; border:2px solid #64748b; border-top-color: transparent; border-radius:50%; animation:spin 0.9s linear infinite; display:inline-block; }
+  @keyframes spin { to { transform: rotate(360deg);} }
+</style>
 </head>
-<body>
-  <header>
-    <h1>⚡ Fast-Cycle Bot</h1>
-    <div class="row">
-      <div class="seg" id="modeSeg">
-        <button id="btnSafe" class="active" onclick="setMode('safe')">Safe</button>
-        <button id="btnFast" onclick="setMode('fast')">Fast</button>
-      </div>
-      <button class="btn start" onclick="post('/api/start-core')">Start Core</button>
-      <button class="btn stop"  onclick="post('/api/stop-core')">Stop Core</button>
-      <div class="row">
-        <input type="number" id="amt" min="10" step="1" value="20" />
-        <button class="btn add" onclick="addWorker()">Add Card</button>
-      </div>
+<body class="bg-slate-900 text-slate-100">
+<div class="max-w-7xl mx-auto px-3 py-5">
+  <header class="flex items-center justify-between mb-4">
+    <h1 class="text-xl font-semibold">⚡ Fast-Cycle Bot</h1>
+    <div class="flex gap-2">
+      <button id="startBtn" class="btn">Start Core</button>
+      <button id="stopBtn" class="btn btn-red">Stop Core</button>
+      <button id="addCardBtn" class="btn">Add Card</button>
     </div>
   </header>
 
-  <div class="container">
-    <div class="grid">
-      <!-- Left -->
-      <div class="card">
-        <h3 style="margin:0 0 10px">Global Status</h3>
-        <div class="kv" id="global">
-          <div>Mode:</div><div><span id="modeTxt">safe</span> <span class="muted">(Safe dip ≥ {{ safe_drop_pct }}%, strict EMA/vol)</span></div>
+  <!-- Global -->
+  <section class="card mb-4">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <div class="space-y-1">
+        <div>Running: <span id="running" class="badge">-</span></div>
+        <div>Mode: <span id="mode" class="badge">-</span></div>
+        <div>Profit: <span id="profit" class="font-medium">-</span></div>
+        <div class="text-xs text-slate-400">Auto-refresh 2s</div>
+      </div>
 
-          <div>Watchlist:</div>
-          <div>Valid <span id="wlc">-</span> <span class="muted">(from <span id="wlt">-</span>)</span></div>
+      <div class="flex flex-wrap gap-2">
+        <label class="text-sm text-slate-300">Mode</label>
+        <select id="modeSel" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-2">
+          <option value="fast">Fast</option>
+          <option value="safe">Safe</option>
+        </select>
 
-          <div>Start Net (USDT):</div><div id="startv">-</div>
-          <div>Current Net (USDT):</div><div id="curv">-</div>
-
-          <div>Profit:</div>
-          <div><span id="p_usd">-</span> <span class="muted">(<span id="p_pct">-</span>)</span></div>
-
-          <div>Exit Rules:</div>
-          <div><code>Hard TP +{{ '%.2f' % tp_trigger_pct }}% → Trail arm +{{ '%.2f' % trail_arm }}% / giveback {{ '%.2f' % trail_pct }}% | SL {{ '%.2f' % sl_pct }}% | Time {{ time_limit }}m</code></div>
-
-          <div>Watchlist Symbols:</div>
-          <div>
-            <details>
-              <summary>View Symbols ({{ watchlist_list|length }})</summary>
-              <div class="chips" style="margin-top:8px">
-                {% for sym in watchlist_list %}<span class="chip">{{ sym }}</span>{% endfor %}
-              </div>
-            </details>
-          </div>
-        </div>
-
-        <hr style="border-color:#223058;margin:12px 0">
-        <h3 style="margin:0 0 10px">Worker Cards</h3>
-        <div id="cards" class="grid-3"></div>
-        <div class="muted" style="margin-top:6px">Cards scan concurrently. A spinner shows when scanning/buying/selling.</div>
-
-        <!-- Debug (collapsible) -->
-        <details style="margin-top:12px" id="dbgDetails">
-          <summary>Debug Panel (why buys are rejected)</summary>
-          <div class="card" style="margin-top:10px">
-            <div class="row" style="justify-content:space-between; margin-bottom:8px">
-              <label style="display:flex;align-items:center;gap:10px">
-                <span>Debug:</span>
-                <span class="switch"><input type="checkbox" id="dbgToggle" checked onchange="toggleDebug(this.checked)"><span class="slider"></span></span>
-                <strong id="dbgState">ON</strong>
-              </label>
-              <div class="row">
-                <button class="btn add" onclick="copyDebug()">Copy JSON</button>
-                <a class="btn start" href="/api/debug/export?format=csv" target="_blank" rel="noopener">Download CSV</a>
-                <a class="btn start" href="/api/debug/export?format=json" target="_blank" rel="noopener">Download JSON</a>
-              </div>
+        <label class="text-sm text-slate-300 ml-3">Watchlist</label>
+        <details class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-2">
+          <summary class="cursor-pointer">Edit symbols</summary>
+          <div class="mt-2">
+            <textarea id="watchlist" rows="3" class="w-72 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs"></textarea>
+            <div class="mt-2 flex gap-2">
+              <button id="saveWatch" class="btn">Save</button>
             </div>
-
-            <div class="row" id="dbg-counts" style="flex-wrap:wrap; gap:6px; margin-bottom:8px"></div>
-            <div style="overflow:auto; max-width:100%; max-height:40vh">
-              <table id="dbg-table">
-                <thead>
-                  <tr>
-                    <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Reason</th>
-                    <th>24h</th><th>EMA</th><th>Vol</th><th class="col-note">Pattern</th>
-                  </tr>
-                </thead>
-                <tbody id="dbg-body">
-                  <tr><td colspan="8" class="muted">Collecting rejections…</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="muted" style="margin-top:6px">Updates every 2s. Turning debug OFF stops recording new events.</div>
           </div>
         </details>
-      </div>
 
-      <!-- Right -->
-      <div class="card">
-        <h3 style="margin:0 0 10px">All Trade History</h3>
-        <div style="overflow:auto; max-width:100%; max-height:70vh">
-          <table id="trades">
-            <thead>
-              <tr>
-                <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Action</th>
-                <th>Price</th><th class="col-qty">Qty</th><th>PnL %</th><th class="col-note">Note</th>
-              </tr>
-            </thead>
-            <tbody id="tbody"></tbody>
-          </table>
-        </div>
-        <div class="muted" style="margin-top:6px">Auto-refreshing every 2s (showing up to {{ recent_limit }} rows).</div>
+        <details class="ml-3 bg-slate-800 border border-slate-700 rounded-lg px-2 py-2">
+          <summary class="cursor-pointer">Debug</summary>
+          <div class="mt-2 flex items-center gap-2">
+            <label class="text-sm">Enabled</label>
+            <input id="debugToggle" type="checkbox" checked class="accent-emerald-500">
+            <button id="copyDebug" class="btn">Copy</button>
+            <button id="exportDebug" class="btn">Export</button>
+          </div>
+          <pre id="debugBox" class="mt-2 max-h-64 overflow-auto text-xs bg-slate-900 p-2 rounded-lg"></pre>
+        </details>
       </div>
     </div>
-  </div>
+  </section>
 
-  <script>
-    const tbody = document.getElementById('tbody');
-    const dbgBody = document.getElementById('dbg-body');
-    const dbgCounts = document.getElementById('dbg-counts');
+  <!-- Workers -->
+  <section class="card">
+    <h2 class="font-semibold mb-3">Worker Cards</h2>
+    <div id="workers" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+  </section>
 
-    function cls(v){ return (v>=0) ? 'pnl-pos' : 'pnl-neg'; }
-    function fmt(v,d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
-    async function post(url, body){ await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):'{}'}); }
-    async function addWorker(){ const amt=parseFloat(document.getElementById('amt').value||'20'); await post('/api/add-worker',{quote:amt}); await refresh(); }
-    async function stopWorker(id){ await post('/api/stop-worker',{worker_id:id}); await refresh(); }
-    async function setMode(mode){
-      await post('/api/mode',{mode});
-      document.getElementById('btnSafe').classList.toggle('active',mode==='safe');
-      document.getElementById('btnFast').classList.toggle('active',mode==='fast');
-      await refresh();
-    }
-    async function toggleDebug(enabled){
-      await fetch('/api/debug/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
-      document.getElementById('dbgState').textContent = enabled ? 'ON' : 'OFF';
-    }
-    async function copyDebug(){
-      try{
-        const r = await fetch('/api/debug');
-        const data = await r.json();
-        const txt = JSON.stringify(data.events || [], null, 2);
-        await navigator.clipboard.writeText(txt);
-        alert('Debug JSON copied to clipboard!');
-      }catch(e){ alert('Copy failed'); }
-    }
+  <!-- Trades -->
+  <section class="card mt-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="font-semibold">Trade History</h2>
+      <span id="tradeCount" class="badge">0</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-slate-300">
+          <tr class="text-left">
+            <th class="py-2 pr-3">Time</th>
+            <th class="py-2 pr-3">Worker</th>
+            <th class="py-2 pr-3">Side</th>
+            <th class="py-2 pr-3">Symbol</th>
+            <th class="py-2 pr-3">Price</th>
+            <th class="py-2 pr-3">Amount</th>
+            <th class="py-2 pr-3">PnL %</th>
+          </tr>
+        </thead>
+        <tbody id="trades"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
 
-    function renderWorkers(workers){
-      const wrap = document.getElementById('cards');
-      wrap.innerHTML = '';
-      if(!workers || !workers.length){
-        wrap.innerHTML = '<div class="muted">No cards yet. Add one with an amount and it will start scanning.</div>';
-        return;
-      }
-      workers.forEach(w=>{
-        const scanning = (w.status==='scanning'||w.status==='buying'||w.status==='selling');
-        const pnl = (w.last_pnl==null) ? '-' : (Number(w.last_pnl).toFixed(3)+'%');
-        const sym = w.symbol || '-';
-        const note = w.note || '-';
+<script>
+const API = ""; // same origin
+const $ = (id)=>document.getElementById(id);
 
-        // live PnL
-        const uPct = (w.unreal_pct==null) ? '-' : `${Number(w.unreal_pct).toFixed(3)}%`;
-        const uUsd = (w.unreal_usd==null) ? '-' : `${(w.unreal_usd>=0?'+':'')+Number(w.unreal_usd).toFixed(3)} USDT`;
-        const curP = (w.cur_price==null) ? '-' : Number(w.cur_price).toFixed(6);
-        const entP = (w.entry_price==null) ? '-' : Number(w.entry_price).toFixed(6);
+async function jget(url){ const r=await fetch(url); return r.json(); }
+async function jpost(url, body){ const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}); return r.json(); }
 
-        const tpP   = (w.tp_price==null) ? '-' : Number(w.tp_price).toFixed(6);
-        const taP   = (w.trail_arm_price==null) ? '-' : Number(w.trail_arm_price).toFixed(6);
-        const slP   = (w.sl_price==null) ? '-' : Number(w.sl_price).toFixed(6);
+async function loadStatus() {
+  const s = await jget(`${API}/api/status`);
+  $("running").textContent = s.running ? "Yes" : "No";
+  $("mode").textContent = s.mode;
+  $("modeSel").value = s.mode;
+  $("watchlist").value = s.watchlist;
+  $("profit").textContent = `${s.profit.abs.toFixed(2)} USDT (${s.profit.pct.toFixed(2)}%)`;
+  renderWorkers(s.workers);
+}
+function renderWorkers(map){
+  const container = $("workers");
+  container.innerHTML = "";
+  Object.values(map).forEach(w=>{
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `
+      <div class="flex items-center justify-between">
+        <div class="font-medium">Card #${w.id}</div>
+        <div class="text-xs text-slate-400">${w.started_at || ""}</div>
+      </div>
+      <div class="mt-2 grid grid-cols-2 gap-2 text-sm">
+        <div>Amount</div><div class="text-right">${(w.amount||0).toFixed(2)} USDT</div>
+        <div>Status</div><div class="text-right">${w.status}${w.status==="idle" ? ' <span class="spinner"></span>' : ''}</div>
+        <div>Symbol</div><div class="text-right">${w.symbol || "-"}</div>
+        <div>Note</div><div class="text-right">${w.note || "-"}</div>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+}
 
-        // time in trade
-        const started = w.started ? new Date(w.started) : null;
-        let heldTxt = '-';
-        if(started){
-          const secs = Math.max(0, Math.floor((Date.now() - started.getTime())/1000));
-          const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = secs%60;
-          heldTxt = `${h>0?String(h).padStart(2,'0')+':':''}${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-        }
+async function loadTrades(){
+  const list = await jget(`${API}/api/trades`);
+  $("tradeCount").textContent = list.length;
+  const tb = $("trades");
+  tb.innerHTML = "";
+  list.slice().reverse().forEach(t=>{
+    const tr = document.createElement("tr");
+    tr.className="border-t border-slate-800";
+    tr.innerHTML = `
+      <td class="py-2 pr-3">${t.time?.replace('T',' ').replace('+00:00','') || ""}</td>
+      <td class="py-2 pr-3">${t.worker || ""}</td>
+      <td class="py-2 pr-3">${t.side || ""}</td>
+      <td class="py-2 pr-3">${t.symbol || ""}</td>
+      <td class="py-2 pr-3">${t.price?.toFixed ? t.price.toFixed(4) : t.price || ""}</td>
+      <td class="py-2 pr-3">${t.amount?.toFixed ? t.amount.toFixed(2) : t.amount || ""}</td>
+      <td class="py-2 pr-3">${t.pnl_pct!==undefined ? t.pnl_pct.toFixed(2) : ""}</td>
+    `;
+    tb.appendChild(tr);
+  });
+}
 
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.innerHTML = `
-          <div class="row" style="justify-content:space-between; margin-bottom:6px">
-            <div><strong>Card #${w.id}</strong> • <span class="muted mono">${(w.updated||'').replace('T',' ').replace('Z','')}</span></div>
-            <button class="btn stop" onclick="stopWorker(${w.id})">Stop</button>
-          </div>
-          <div class="kv mono">
-            <div>Amount:</div><div>${fmt(w.quote,2)} USDT</div>
-            <div>Status:</div><div>${scanning?'<span class="spinner"></span> ':''}<span>${w.status}</span></div>
-            <div>Symbol:</div><div>${sym}</div>
+async function loadDebug(){
+  const items = await jget(`${API}/api/debug?limit=300`);
+  $("debugBox").textContent = JSON.stringify(items, null, 2);
+}
 
-            <div>Entry Price:</div><div>${entP}</div>
-            <div>Current Price:</div><div>${curP}</div>
+$("startBtn").onclick = ()=> jpost(`${API}/api/start`).then(loadStatus);
+$("stopBtn").onclick = ()=> jpost(`${API}/api/stop`).then(loadStatus);
+$("addCardBtn").onclick = async ()=>{
+  const amt = prompt("Amount in USDT per card:", "20");
+  if(!amt) return;
+  await jpost(`${API}/api/workers/add`, {amount: parseFloat(amt)});
+  await loadStatus();
+};
+$("modeSel").onchange = async (e)=>{
+  await jpost(`${API}/api/mode`, {mode: e.target.value});
+  await loadStatus();
+};
+$("saveWatch").onclick = async ()=>{
+  await jpost(`${API}/api/watchlist`, {watchlist: $("watchlist").value});
+  await loadStatus();
+};
+$("debugToggle").onchange = async (e)=>{
+  await jpost(`${API}/api/debug/toggle`, {on: e.target.checked});
+  await loadDebug();
+};
+$("copyDebug").onclick = ()=>{
+  navigator.clipboard.writeText($("debugBox").textContent||"");
+};
+$("exportDebug").onclick = ()=>{
+  const blob = new Blob([$(`debugBox`).textContent||""], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `debug_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
-            <div>Unrealized:</div>
-            <div><span class="${(w.unreal_pct==null)?'':(w.unreal_pct>=0?'pnl-pos':'pnl-neg')}">${uPct}</span> <span class="muted">(${uUsd})</span></div>
-
-            <div>Targets:</div>
-            <div>TP ${tpP} • TrailArm ${taP} • SL ${slP}</div>
-
-            <div>Time in Trade:</div><div>${heldTxt}</div>
-
-            <div>Last PnL (realized):</div><div>${pnl}</div>
-            <div>Note:</div><div>${note}</div>
-          </div>`;
-        wrap.appendChild(card);
-      });
-    }
-
-    function boolBadge(ok){ return ok ? '<span class="chip" style="background:#11361f;color:#86efac">OK</span>' : '<span class="chip" style="background:#3a0e12;color:#fca5a5">NO</span>'; }
-    function renderDebugCounts(counts){
-      dbgCounts.innerHTML=''; const keys=Object.keys(counts);
-      if(keys.length===0){ dbgCounts.innerHTML='<span class="muted">No data yet</span>'; return; }
-      keys.forEach(k=>{ const span=document.createElement('span'); span.className='chip'; span.textContent=`${k}: ${counts[k]}`; dbgCounts.appendChild(span); });
-    }
-    function renderDebugEvents(events){
-      dbgBody.innerHTML='';
-      if(!events || events.length===0){
-        const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No debug events yet.'; tr.appendChild(td); dbgBody.appendChild(tr); return;
-      }
-      events.forEach(e=>{
-        const tr=document.createElement('tr');
-        tr.innerHTML = `
-          <td>${(e.time||'').replace('T',' ').replace('Z','')}</td>
-          <td class="col-worker">${e.worker_id ?? ''}</td>
-          <td>${e.symbol}</td>
-          <td><span class="chip">${e.reason}</span></td>
-          <td>${boolBadge(!!e.day_ok)}</td>
-          <td>${boolBadge(!!e.ema_ok)}</td>
-          <td>${boolBadge(!!e.vol_ok)}</td>
-          <td class="col-note">${boolBadge(!!e.pattern_ok)}</td>`;
-        dbgBody.appendChild(tr);
-      });
-    }
-
-    async function refresh(){
-      try{
-        const st = await (await fetch('/api/status')).json();
-        document.getElementById('modeTxt').textContent = st.mode || 'safe';
-        document.getElementById('btnSafe').classList.toggle('active', st.mode==='safe');
-        document.getElementById('btnFast').classList.toggle('active', st.mode==='fast');
-
-        document.getElementById('dbgToggle').checked = !!st.debug_enabled;
-        document.getElementById('dbgState').textContent = st.debug_enabled ? 'ON' : 'OFF';
-
-        document.getElementById('wlc').textContent = st.watchlist_count ?? '-';
-        document.getElementById('wlt').textContent = st.watchlist_total ?? '-';
-        document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':Number(st.start_net_usdt).toFixed(2));
-        document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':Number(st.current_net_usdt).toFixed(2));
-        const pusd=st.profit_usd, ppct=st.profit_pct;
-        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${Number(pusd).toFixed(2)} USDT`);
-        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${Number(ppct).toFixed(2)}%`);
-        renderWorkers(st.workers||[]);
-      }catch(e){}
-      try{
-        const data = await (await fetch('/api/trades')).json();
-        const rows = data.rows || []; tbody.innerHTML='';
-        if(rows.length===0){
-          const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No trades yet.'; tr.appendChild(td); tbody.appendChild(tr);
-        }else{
-          rows.forEach(r=>{
-            const tr=document.createElement('tr'); const pnl=parseFloat(r.pnl_pct||'');
-            tr.innerHTML = `
-              <td>${r.time}</td>
-              <td class="col-worker">${r.worker_id||''}</td>
-              <td>${r.symbol}</td>
-              <td><span class="chip">${r.action}</span></td>
-              <td>${r.price}</td>
-              <td class="col-qty">${r.qty}</td>
-              <td class="${isNaN(pnl)?'':(pnl>=0?'pnl-pos':'pnl-neg')}">${r.pnl_pct||''}</td>
-              <td class="col-note">${r.note||''}</td>`;
-            tbody.appendChild(tr);
-          });
-        }
-      }catch(e){}
-    }
-
-    async function refreshDebug(){
-      try{
-        const r = await fetch('/api/debug');
-        const data = await r.json();
-        document.getElementById('dbgToggle').checked = !!data.enabled;
-        document.getElementById('dbgState').textContent = data.enabled ? 'ON' : 'OFF';
-        renderDebugCounts(data.counts || {});
-        renderDebugEvents(data.events || []);
-      }catch(e){}
-    }
-
-    setInterval(refresh, 2000);
-    setInterval(refreshDebug, 2000);
-    post('/api/start-core').then(()=>{ refresh(); refreshDebug(); });
-  </script>
+async function tick(){
+  await loadStatus();
+  await loadTrades();
+  await loadDebug();
+}
+tick();
+setInterval(tick, 2000);
+</script>
 </body>
 </html>
