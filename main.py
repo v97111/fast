@@ -1,472 +1,518 @@
 import os
-import threading
 import time
-import math
 import json
+import math
 import queue
-import random
+import threading
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional
 
-from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
+from flask import Flask, jsonify, request, render_template
+from dotenv import load_dotenv
 
-# =========================
-# Config & Defaults
-# =========================
-PORT = int(os.getenv("PORT", "8080"))
-MODE = os.getenv("MODE", "fast").lower()            # "fast" | "safe"
-SIMULATE = os.getenv("SIMULATE", "true").lower() == "true"
+# Optional: python-binance (public endpoints work without keys)
+BINANCE_OK = True
+try:
+    from binance import Client
+    from binance.exceptions import BinanceAPIException
+except Exception:
+    BINANCE_OK = False
+    Client = None
+    BinanceAPIException = Exception
 
-REFRESH_SEC = 2
-TP_TRIGGER_PCT = float(os.getenv("TP_TRIGGER_PCT", "1.0"))   # sell take-profit trigger %
-TRAIL_GIVEBACK_PCT = float(os.getenv("TRAIL_GIVEBACK_PCT", "0.4"))
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "1.5"))
-TIME_LIMIT_MIN = int(os.getenv("TIME_LIMIT_MIN", "45"))
+load_dotenv()
 
-# FAST vs SAFE buy filters (SAFE unchanged)
-FAST_DAY_MOVE_MIN = 0.5    # relaxed
-FAST_PULLBACK_MIN = 0.15   # relaxed
-FAST_VOL_SPIKE_X = 1.05    # relaxed
-
-SAFE_DAY_MOVE_MIN = 2.5
-SAFE_PULLBACK_MIN = 0.5
-SAFE_VOL_SPIKE_X = 1.2
-
-# Pattern logic:
-#  - "prev_high": require dip then recovery over previous high (SAFE)
-#  - "bounce_only": higher close than prior candle (FAST)
-#  - "none": (requested) remove pattern, but tighten other filters (below)
-PATTERN = os.getenv("PATTERN", "auto").lower()      # "auto"|"prev_high"|"bounce_only"|"none"
-
-# If pattern is none, raise the other bars slightly to avoid mass buys
-NONE_DAY_MOVE_BONUS = 0.3        # add 0.3% to day-move requirement
-NONE_PULLBACK_BONUS = 0.1        # add 0.1% to pullback requirement
-NONE_VOL_SPIKE_BONUS = 0.03      # add 0.03x to volume spike requirement
-
-# Watchlist default
-DEFAULT_WATCH = ("BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,ADAUSDT,XRPUSDT,DOTUSDT,"
-                 "LINKUSDT,AVAXUSDT,MATICUSDT,TONUSDT,ARBUSDT,SUIUSDT,LTCUSDT,BCHUSDT")
+app = Flask(__name__, template_folder="templates")
 
 # =========================
-# App
+# Config (edit if you want)
 # =========================
-app = Flask(__name__, static_folder="static", static_url_path="/static")
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+SCAN_INTERVAL_SEC = float(os.getenv("SCAN_INTERVAL_SEC", "2"))
+EMA_PERIOD = 50  # EMA50
+VOL_SPIKE_MULT_SAFE = float(os.getenv("VOL_SPIKE_MULT_SAFE", "1.5"))
+VOL_SPIKE_MULT_FAST = float(os.getenv("VOL_SPIKE_MULT_FAST", "1.2"))
+VOL_SPIKE_MULT_NONEPATTERN = float(os.getenv("VOL_SPIKE_MULT_NONEPATTERN", "1.8"))  # when pattern="none"
+TP_PROFIT_PCT = float(os.getenv("TP_PROFIT_PCT", "0.01"))  # 1% take profit
+# Safe buy pattern window
+SAFE_DROP_PCT = float(os.getenv("SAFE_DROP_PCT", "0.003"))  # 0.3% dip on previous candle
+# "Recent high" lookback for rebound checks (fast mode uses smaller)
+RECENT_HIGH_LOOKBACK_SAFE = int(os.getenv("RECENT_HIGH_LOOKBACK_SAFE", "50"))  # candles
+RECENT_HIGH_LOOKBACK_FAST = int(os.getenv("RECENT_HIGH_LOOKBACK_FAST", "20"))
+
+# When pattern == "none", we tighten other conditions (to avoid mass buys)
+NONEPATTERN_24H_MOVE_MIN = float(os.getenv("NONE_24H_MOVE_MIN", "-0.01"))  # -1%
+NONEPATTERN_24H_MOVE_MAX = float(os.getenv("NONE_24H_MOVE_MAX", "0.02"))   # +2%
 
 # =========================
-# In-memory state
+# Binance client (public OK)
 # =========================
-state: Dict[str, Any] = {
-    "running": False,
-    "mode": MODE,  # "fast" or "safe"
-    "simulate": SIMULATE,
-    "start_net": 0.0,        # starting net in USDT
-    "current_net": 0.0,      # live net
-    "watchlist_text": DEFAULT_WATCH,
-    "debug_on": True,
-    "workers": {},           # worker_id -> dict
-    "trades": [],            # list of fills/closed trades
-    "last_status_ts": None,
-}
-
-debug_ring: queue.Queue = queue.Queue(maxsize=5000)   # ring buffer for debug events
-
-def dbg(event: Dict[str, Any]):
-    if not state.get("debug_on", True):
-        return
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+if BINANCE_OK:
     try:
-        if debug_ring.full():
-            debug_ring.get_nowait()
-        debug_ring.put_nowait(event)
-    except queue.Full:
-        pass
+        client = Client(api_key=BINANCE_API_KEY or None, api_secret=BINANCE_API_SECRET or None)
+    except Exception:
+        client = None
+else:
+    client = None
 
-# =========================
-# Utility: Mock market data
-# Replace with your real Binance fetches.
-# =========================
-def fake_price(symbol: str) -> float:
-    rnd = abs(hash(f"{symbol}:{int(time.time()/5)}")) % 10_000
-    base = 10 + (rnd % 500) / 10.0
-    return round(base, 4)
 
-def fake_24h_change(symbol: str) -> float:
-    # percent change
-    return round(random.uniform(-1.0, 3.5), 2)
+# =========
+# State
+# =========
+@dataclass
+class Position:
+    symbol: str
+    qty: float
+    buy_price: float
+    ts: str
+    worker_id: int
 
-def fake_volume_spike(symbol: str) -> float:
-    # multiple vs baseline
-    return round(random.uniform(0.9, 1.6), 2)
 
-def fake_candles(symbol: str, n=5) -> List[Dict[str, float]]:
-    # OHLC small random walk
+@dataclass
+class Worker:
+    id: int
+    amount: float = 20.0           # USDT to spend
+    status: str = "idle"           # idle | scanning | bought
+    symbol: Optional[str] = None
+    note: str = ""
+    started_at: Optional[str] = None
+    position: Optional[Position] = None
+
+
+state_lock = threading.Lock()
+running = False
+mode = "fast"  # "safe" or "fast"
+debug_on = True
+
+# default watchlist (you can paste your big list here)
+watchlist_text = "BTCUSDT,ETHUSDT,BNBUSDT,ADAUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,MATICUSDT,AVAXUSDT,DOTUSDT"
+workers: Dict[int, Worker] = {}
+trades: List[Dict[str, Any]] = []
+debug_events: List[Dict[str, Any]] = []
+debug_cap = 5000
+
+# Profit tracking
+starting_usdt = 1000.0
+current_usdt = starting_usdt
+assets: Dict[str, Position] = {}  # symbol -> Position (paper trading one per symbol)
+
+
+# =========
+# Helpers
+# =========
+def utcnow_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def append_debug(ev: Dict[str, Any]):
+    global debug_events
+    if not debug_on:
+        return
+    ev2 = {k: v for k, v in ev.items()}
+    ev2["time"] = utcnow_iso()
+    debug_events.append(ev2)
+    if len(debug_events) > debug_cap:
+        debug_events = debug_events[-debug_cap:]
+
+def ema(values: List[float], period: int) -> List[float]:
+    if not values:
+        return []
+    k = 2 / (period + 1)
     out = []
-    px = fake_price(symbol)
-    for i in range(n):
-        op = px * (1 + random.uniform(-0.002, 0.002))
-        hi = op * (1 + random.uniform(0.000, 0.006))
-        lo = op * (1 - random.uniform(0.000, 0.006))
-        cl = op * (1 + random.uniform(-0.003, 0.003))
-        out.append({"open": op, "high": hi, "low": lo, "close": cl})
-        px = cl
+    ema_prev = None
+    for v in values:
+        if ema_prev is None:
+            ema_prev = v
+        else:
+            ema_prev = v * k + ema_prev * (1 - k)
+        out.append(ema_prev)
     return out
 
-# =========================
-# Policy helpers
-# =========================
-def current_policy():
-    m = state["mode"]
-    if m == "safe":
-        pol = {
-            "day_move_min": SAFE_DAY_MOVE_MIN,
-            "pullback_min": SAFE_PULLBACK_MIN,
-            "vol_spike_x": SAFE_VOL_SPIKE_X,
-            "pattern": "prev_high",
-        }
-    else:
-        pol = {
-            "day_move_min": FAST_DAY_MOVE_MIN,
-            "pullback_min": FAST_PULLBACK_MIN,
-            "vol_spike_x": FAST_VOL_SPIKE_X,
-            "pattern": "bounce_only",
-        }
+def get_klines(symbol: str, interval="1m", limit=120) -> List[Dict[str, float]]:
+    if not client:
+        return []
+    try:
+        rows = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        out = []
+        for r in rows:
+            out.append({
+                "open_time": r[0],
+                "open": float(r[1]),
+                "high": float(r[2]),
+                "low": float(r[3]),
+                "close": float(r[4]),
+                "volume": float(r[5]),
+                "close_time": r[6]
+            })
+        return out
+    except Exception as e:
+        append_debug({"symbol": symbol, "reason": "klines_error", "error": str(e)})
+        return []
 
-    if PATTERN in ("prev_high", "bounce_only", "none"):
-        pol["pattern"] = PATTERN
-
-    # if pattern is none: tighten other filters a little
-    if pol["pattern"] == "none":
-        pol = {
-            **pol,
-            "day_move_min": pol["day_move_min"] + NONE_DAY_MOVE_BONUS,
-            "pullback_min": pol["pullback_min"] + NONE_PULLBACK_BONUS,
-            "vol_spike_x": pol["vol_spike_x"] + NONE_VOL_SPIKE_BONUS,
+def get_ticker_24h(symbol: str) -> Dict[str, Any]:
+    if not client:
+        return {}
+    try:
+        t = client.get_ticker(symbol=symbol)
+        return {
+            "lastPrice": float(t["lastPrice"]),
+            "priceChangePercent": float(t["priceChangePercent"]) / 100.0,  # -0.05 for -5%
+            "highPrice": float(t["highPrice"]),
+            "lowPrice": float(t["lowPrice"])
         }
-    return pol
+    except Exception as e:
+        append_debug({"symbol": symbol, "reason": "ticker_error", "error": str(e)})
+        return {}
 
-def check_buy(symbol: str) -> Dict[str, Any]:
+def recent_high(closes: List[float], lookback: int) -> Optional[float]:
+    if not closes:
+        return None
+    look = closes[-lookback:] if len(closes) >= lookback else closes
+    return max(look) if look else None
+
+
+# ==============================
+# Buy logic / Sell logic (paper)
+# ==============================
+def evaluate_symbol(symbol: str, policy: Dict[str, Any]) -> Dict[str, Any]:
     """
     Returns:
-      { ok: bool, reason: str, day_ok, ema_ok, vol_ok, pattern_ok }
+      {
+        ok: bool,
+        reason: str,
+        day_ok, ema_ok, vol_ok, pattern_ok: bool
+      }
     """
-    pol = current_policy()
+    candles = get_klines(symbol, "1m", limit=max(EMA_PERIOD + 5, 60))
+    if len(candles) < max(EMA_PERIOD, 20):
+        return {"ok": False, "reason": "no_data", "day_ok": False, "ema_ok": False, "vol_ok": False, "pattern_ok": False}
 
-    # ===== Gather “features” (replace with real data) =====
-    day_change = fake_24h_change(symbol)           # %
-    vol_spike = fake_volume_spike(symbol)          # x multiple
-    candles = fake_candles(symbol, n=5)
+    closes = [c["close"] for c in candles]
+    vols = [c["volume"] for c in candles]
+    last = candles[-1]
+    prev = candles[-2]
 
-    # Pullback = (prev high - prev close)/prev high
-    pullback = 0.0
-    if len(candles) >= 2:
-        prev = candles[-2]
-        if prev["high"] > 0:
-            pullback = max(0.0, (prev["high"] - prev["close"]) / prev["high"] * 100.0)
+    # Day filter
+    t24 = get_ticker_24h(symbol)
+    if not t24:
+        return {"ok": False, "reason": "no_ticker", "day_ok": False, "ema_ok": False, "vol_ok": False, "pattern_ok": False}
+    day_chg = t24["priceChangePercent"]  # e.g. 0.03 for +3%
+    # relaxed but avoids extremes
+    day_ok = (-0.06 <= day_chg <= 0.06)
 
-    # “EMA ok” proxy: last close above prior close (replace with EMA50 actual)
-    ema_ok = len(candles) >= 2 and candles[-1]["close"] >= candles[-2]["close"]
+    # Trend (EMA50 up & price at/above EMA)
+    e = ema(closes, EMA_PERIOD)
+    ema50 = e[-1]
+    ema_ok = (last["close"] >= ema50 and ema50 >= e[-2])  # trending up and price not below EMA
 
-    day_ok = day_change >= pol["day_move_min"]
-    vol_ok = vol_spike >= pol["vol_spike_x"]
-    pull_ok = pullback >= pol["pullback_min"]
+    # Volume spike
+    avg_vol = sum(vols[-30:-1]) / max(1, len(vols[-30:-1]))
+    if policy["pattern"] == "none":
+        vol_mult = max(policy["vol_mult"], VOL_SPIKE_MULT_NONEPATTERN)  # stricter if no pattern
+    else:
+        vol_mult = policy["vol_mult"]
+    vol_ok = (last["volume"] >= avg_vol * vol_mult)
 
-    # Pattern block
+    # Pattern
     pattern_ok = False
-    if pol["pattern"] == "prev_high":
+    if policy["pattern"] == "prev_high":  # SAFE
         if len(candles) >= 2:
-            c_prev, c_last = candles[-2], candles[-1]
-            dipped = c_prev["high"] > 0 and ((c_prev["high"] - c_prev["low"]) / c_prev["high"] >= 0.005)  # ~0.5%
-            recovered = c_last["close"] > c_prev["high"]
+            c_prev = candles[-2]
+            # prior candle dipped then price recovered above prior high
+            dipped = (c_prev["close"] > 0) and ((c_prev["close"] - c_prev["low"]) / c_prev["close"] >= SAFE_DROP_PCT)
+            recovered = last["close"] > c_prev["high"]
             pattern_ok = dipped and recovered
-    elif pol["pattern"] == "bounce_only":
+
+    elif policy["pattern"] == "bounce_only":  # FAST
         if len(candles) >= 3:
-            prev2 = candles[-3]
-            prev1 = candles[-2]
-            pattern_ok = prev1["close"] > prev2["close"]
-    elif pol["pattern"] == "none":
-        pattern_ok = True  # intentionally ignored by policy, but our tightened thresholds above gate buys
+            c_prev2 = candles[-3]
+            c_prev1 = candles[-2]
+            # green continuation
+            pattern_ok = (c_prev1["close"] > c_prev1["open"]) and (last["close"] >= c_prev1["close"])
 
-    # Decision
-    ok = day_ok and ema_ok and vol_ok and pull_ok and pattern_ok
-    reason = "ok" if ok else (
-        "no_pullback_recovery" if (day_ok and ema_ok and vol_ok and not pull_ok) else
-        "no_vol_spike" if (day_ok and ema_ok and not vol_ok) else
-        "below_ema50" if (not ema_ok) else
-        "low_24h_move" if (not day_ok) else
-        "pattern_fail"
-    )
+    elif policy["pattern"] == "none":
+        # No explicit pattern, but tighten other criteria:
+        # - last candle must be green
+        # - 24h move inside narrow band
+        # - (already used stronger vol spike above)
+        green = last["close"] > last["open"]
+        narrow_day = (NONEPATTERN_24H_MOVE_MIN <= day_chg <= NONEPATTERN_24H_MOVE_MAX)
+        pattern_ok = green and narrow_day
 
-    # Emit debug
-    dbg({
-        "time": datetime.now(timezone.utc).isoformat(),
-        "worker_id": None,
-        "symbol": symbol,
-        "reason": reason,
-        "day_ok": day_ok,
-        "ema_ok": ema_ok,
-        "vol_ok": vol_ok,
-        "pattern_ok": pattern_ok,
-    })
+    # Additional rebound guard (both modes): last close near recent high (strength)
+    lookback = RECENT_HIGH_LOOKBACK_FAST if policy["name"] == "fast" else RECENT_HIGH_LOOKBACK_SAFE
+    rh = recent_high(closes, lookback)
+    if rh:
+        # price should be within 1.5% of recent high to avoid catching weak bounces
+        near_recent_high = (last["close"] >= rh * 0.985)
+    else:
+        near_recent_high = True
+
+    reason = "ok"
+    if not day_ok:
+        reason = "day_extreme"
+    elif not ema_ok:
+        reason = "below_ema50"
+    elif not vol_ok:
+        reason = "no_vol_spike"
+    elif not pattern_ok:
+        reason = "pattern_miss"
+    elif not near_recent_high:
+        reason = "far_from_recent_high"
 
     return {
-        "ok": ok,
+        "ok": (reason == "ok"),
         "reason": reason,
         "day_ok": day_ok,
         "ema_ok": ema_ok,
         "vol_ok": vol_ok,
-        "pattern_ok": pattern_ok,
+        "pattern_ok": pattern_ok
     }
 
-# =========================
-# Worker threads
-# =========================
-WORKER_LOCK = threading.Lock()
-WORKER_ID_SEQ = 0
 
-def next_worker_id() -> int:
-    global WORKER_ID_SEQ
-    with WORKER_LOCK:
-        WORKER_ID_SEQ += 1
-        return WORKER_ID_SEQ
+def try_sell(symbol: str, pos: Position) -> Optional[Dict[str, Any]]:
+    """Simple TP sell: +1% (configurable)."""
+    t24 = get_ticker_24h(symbol)
+    if not t24:
+        return None
+    last_price = t24["lastPrice"]
+    tp_price = pos.buy_price * (1.0 + TP_PROFIT_PCT)
+    if last_price >= tp_price:
+        # Paper trade "sell"
+        pnl_pct = (last_price - pos.buy_price) / pos.buy_price
+        trade = {
+            "time": utcnow_iso(),
+            "worker": pos.worker_id,
+            "side": "SELL",
+            "symbol": symbol,
+            "price": last_price,
+            "amount": pos.qty * last_price,
+            "pnl_pct": pnl_pct * 100.0
+        }
+        with state_lock:
+            global current_usdt
+            current_usdt += pos.qty * last_price
+            assets.pop(symbol, None)
+            trades.append(trade)
+        append_debug({"worker_id": pos.worker_id, "symbol": symbol, "reason": "tp_sell", "price": last_price, "pnl_pct": pnl_pct})
+        return trade
+    return None
 
-def coins_in_play() -> set:
-    """Coins any worker is currently holding (to avoid double buying)."""
-    held = set()
-    for w in state["workers"].values():
-        if w.get("status") == "in_position" and w.get("symbol"):
-            held.add(w["symbol"])
-    return held
 
-def worker_loop(worker_id: int):
-    w = state["workers"][worker_id]
-    amount = w["amount"]
-    watch = [s.strip().upper() for s in state["watchlist_text"].split(",") if s.strip()]
-    i = 0
-    while state["running"] and w["enabled"]:
-        try:
-            # pick next symbol
-            symbol = watch[i % len(watch)]
-            i += 1
+def try_buy(worker: Worker, symbol: str, amount_usdt: float) -> Optional[Dict[str, Any]]:
+    t24 = get_ticker_24h(symbol)
+    if not t24:
+        return None
+    price = t24["lastPrice"]
+    if price <= 0:
+        return None
+    qty = amount_usdt / price
+    pos = Position(symbol=symbol, qty=qty, buy_price=price, ts=utcnow_iso(), worker_id=worker.id)
+    with state_lock:
+        global current_usdt
+        current_usdt -= amount_usdt
+        assets[symbol] = pos
+        worker.position = pos
+        worker.status = "bought"
+        worker.symbol = symbol
+        worker.note = f"Bought at {price:.4f}"
+    trade = {
+        "time": utcnow_iso(),
+        "worker": worker.id,
+        "side": "BUY",
+        "symbol": symbol,
+        "price": price,
+        "amount": amount_usdt,
+        "pnl_pct": 0.0
+    }
+    with state_lock:
+        trades.append(trade)
+    append_debug({"worker_id": worker.id, "symbol": symbol, "reason": "buy", "price": price})
+    return trade
 
-            # skip if already held by another worker
-            if symbol in coins_in_play() and w.get("symbol") != symbol:
-                time.sleep(0.05)
-                continue
 
-            # if not in position, check buy
-            if w["status"] == "idle":
-                res = check_buy(symbol)
-                # Show spinner activity
-                w["last_scan"] = {
-                    "symbol": symbol, "ok": res["ok"], "reason": res["reason"],
-                    "t": datetime.now(timezone.utc).isoformat()
-                }
+def parse_watchlist(text: str) -> List[str]:
+    return [s.strip().upper() for s in text.replace("\n", ",").split(",") if s.strip()]
 
-                if res["ok"]:
-                    # BUY (simulate)
-                    w["status"] = "in_position"
-                    w["symbol"] = symbol
-                    w["entry_px"] = fake_price(symbol)
-                    w["tp_anchor"] = w["entry_px"] * (1 + TP_TRIGGER_PCT/100.0)
-                    w["trail_max"] = w["tp_anchor"]
-                    w["started_at"] = datetime.now(timezone.utc).isoformat()
-                    w["note"] = f"Bought {symbol} @ {w['entry_px']:.4f} (sim)"
-                    state["trades"].append({
-                        "time": w["started_at"],
-                        "side": "BUY",
-                        "symbol": symbol,
-                        "price": w["entry_px"],
-                        "amount": amount,
-                        "worker": worker_id
-                    })
-                else:
-                    time.sleep(0.02)
 
-            else:
-                # manage position
-                px = fake_price(w["symbol"])
-                # trail logic after TP trigger
-                if px >= w["tp_anchor"]:
-                    w["trail_max"] = max(w["trail_max"], px)
-                    giveback_px = w["trail_max"] * (1 - TRAIL_GIVEBACK_PCT/100.0)
-                    if px <= giveback_px:
-                        # SELL on trail giveback
-                        pnl = (px - w["entry_px"]) / w["entry_px"] * 100.0
-                        state["trades"].append({
-                            "time": datetime.now(timezone.utc).isoformat(),
-                            "side": "SELL",
-                            "symbol": w["symbol"],
-                            "price": px,
-                            "amount": amount,
-                            "worker": worker_id,
-                            "pnl_pct": pnl
-                        })
-                        w.update({"status": "idle", "symbol": None, "entry_px": None, "note": f"Sold on trail @ {px:.4f}"})
-                # hard stop
-                stop_px = w["entry_px"] * (1 - STOP_LOSS_PCT/100.0)
-                if px <= stop_px:
-                    pnl = (px - w["entry_px"]) / w["entry_px"] * 100.0
-                    state["trades"].append({
-                        "time": datetime.now(timezone.utc).isoformat(),
-                        "side": "SELL",
-                        "symbol": w["symbol"],
-                        "price": px,
-                        "amount": amount,
-                        "worker": worker_id,
-                        "pnl_pct": pnl
-                    })
-                    w.update({"status": "idle", "symbol": None, "entry_px": None, "note": f"Sold on stop @ {px:.4f}"})
-                time.sleep(0.05)
+def profit_snapshot():
+    with state_lock:
+        assets_val = 0.0
+        for sym, pos in assets.items():
+            t24 = get_ticker_24h(sym)
+            if t24:
+                assets_val += pos.qty * t24["lastPrice"]
+        cur = current_usdt + assets_val
+        start = starting_usdt
+        pnl_abs = cur - start
+        pnl_pct = (pnl_abs / start * 100.0) if start > 0 else 0.0
+        return {"abs": pnl_abs, "pct": pnl_pct, "assets": assets_val, "usdt": current_usdt}
 
-        except Exception as e:
-            w["note"] = f"Worker error: {e}"
-            time.sleep(0.2)
 
-# =========================
-# Routes
-# =========================
+# =====================
+# Bot thread
+# =====================
+stop_event = threading.Event()
+
+def bot_loop():
+    global running
+    next_worker_id_to_scan = 0
+    while not stop_event.is_set():
+        time.sleep(SCAN_INTERVAL_SEC)
+        with state_lock:
+            run = running
+            wlist = list(workers.values())
+            wl_symbols = parse_watchlist(watchlist_text)
+            current_mode = mode
+        if not run or not wlist or not wl_symbols:
+            continue
+
+        # Mode policy
+        if current_mode == "safe":
+            policy = {"name": "safe", "pattern": "prev_high", "vol_mult": VOL_SPIKE_MULT_SAFE}
+        else:
+            # fast
+            policy = {"name": "fast", "pattern": "bounce_only", "vol_mult": VOL_SPIKE_MULT_FAST}
+
+        # Rotate through workers, each scans the whole watchlist (lightweight)
+        worker = wlist[next_worker_id_to_scan % len(wlist)]
+        next_worker_id_to_scan += 1
+
+        # If worker has position, check sell
+        if worker.position:
+            try_sell(worker.position.symbol, worker.position)
+            continue
+
+        # Otherwise scan for buys
+        best_candidate = None
+        for sym in wl_symbols:
+            with state_lock:
+                # don’t buy same coin if already held by any worker
+                if sym in assets:
+                    continue
+            res = evaluate_symbol(sym, policy)
+            append_debug({
+                "worker_id": worker.id,
+                "symbol": sym,
+                "reason": res["reason"],
+                "day_ok": res["day_ok"],
+                "ema_ok": res["ema_ok"],
+                "vol_ok": res["vol_ok"],
+                "pattern_ok": res["pattern_ok"]
+            })
+            if res["ok"]:
+                # pick the first ok (or you can rank by volume)
+                best_candidate = sym
+                break
+
+        if best_candidate:
+            try_buy(worker, best_candidate, worker.amount)
+
+
+# =====================
+# Flask Routes
+# =====================
 @app.route("/")
-def root():
-    return jsonify({"message": "Bot backend running", "mode": state["mode"], "ok": True, "simulate": state["simulate"]})
-
 @app.route("/dashboard")
-def serve_dashboard():
-    return send_from_directory("static", "index.html")
+def dashboard():
+    # render the Jinja template; the page uses JS to call APIs
+    return render_template("dashboard.html")
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
-    if state["running"]:
-        return jsonify({"ok": True, "message": "already running"})
-    state["running"] = True
-    state["last_status_ts"] = datetime.now(timezone.utc).isoformat()
-    # start existing workers
-    for worker_id, w in state["workers"].items():
-        w["enabled"] = True
-        threading.Thread(target=worker_loop, args=(worker_id,), daemon=True).start()
+    global running
+    with state_lock:
+        running = True
     return jsonify({"ok": True})
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    state["running"] = False
-    for w in state["workers"].values():
-        w["enabled"] = False
+    global running
+    with state_lock:
+        running = False
     return jsonify({"ok": True})
 
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
-    data = request.get_json(force=True)
-    m = data.get("mode", "").lower()
-    if m in ("fast", "safe"):
-        state["mode"] = m
-        return jsonify({"ok": True, "mode": m})
-    return jsonify({"ok": False, "error": "mode must be fast|safe"}), 400
+    global mode
+    data = request.get_json(force=True, silent=True) or {}
+    m = data.get("mode", "fast").lower()
+    if m not in ("fast", "safe"):
+        return jsonify({"ok": False, "error": "invalid mode"}), 400
+    with state_lock:
+        mode = m
+    return jsonify({"ok": True, "mode": mode})
 
 @app.route("/api/watchlist", methods=["POST"])
-def api_watch():
-    data = request.get_json(force=True)
+def api_watchlist():
+    global watchlist_text
+    data = request.get_json(force=True, silent=True) or {}
     wl = data.get("watchlist", "")
     if not wl:
-        return jsonify({"ok": False, "error": "watchlist required"}), 400
-    state["watchlist_text"] = wl
-    return jsonify({"ok": True})
-
-@app.route("/api/debug/toggle", methods=["POST"])
-def api_debug_toggle():
-    data = request.get_json(force=True)
-    state["debug_on"] = bool(data.get("on", True))
-    return jsonify({"ok": True, "on": state["debug_on"]})
-
-@app.route("/api/debug", methods=["GET"])
-def api_debug():
-    lim = int(request.args.get("limit", "500"))
-    items = []
-    try:
-        # copy non-destructively
-        qlist = list(debug_ring.queue)
-        items = qlist[-lim:]
-    except Exception:
-        pass
-    return jsonify(items)
-
-@app.route("/api/status", methods=["GET"])
-def api_status():
-    # quick global profit calc (simulate)
-    usdt_bal = 0.0
-    assets_val = 0.0
-    for w in state["workers"].values():
-        if w.get("status") == "in_position" and w.get("symbol"):
-            px = fake_price(w["symbol"])
-            # assume amount is USDT quote size
-            assets_val += w["amount"]  # simplified
-        else:
-            usdt_bal += w["amount"]
-
-    current_net = usdt_bal + assets_val
-    start_net = state.get("start_net") or current_net
-    state["start_net"] = start_net
-    state["current_net"] = current_net
-    profit_abs = current_net - start_net
-    profit_pct = (profit_abs / start_net * 100.0) if start_net > 0 else 0.0
-
-    return jsonify({
-        "running": state["running"],
-        "mode": state["mode"],
-        "simulate": state["simulate"],
-        "watchlist": state["watchlist_text"],
-        "start_net": round(start_net, 2),
-        "current_net": round(current_net, 2),
-        "profit": {"abs": round(profit_abs, 2), "pct": round(profit_pct, 2)},
-        "tp": TP_TRIGGER_PCT,
-        "trail": TRAIL_GIVEBACK_PCT,
-        "sl": STOP_LOSS_PCT,
-        "time_limit_min": TIME_LIMIT_MIN,
-        "workers": state["workers"],
-        "ts": datetime.now(timezone.utc).isoformat()
-    })
-
-@app.route("/api/trades", methods=["GET"])
-def api_trades():
-    return jsonify(state["trades"][-1000:])
+        return jsonify({"ok": False, "error": "empty"}), 400
+    with state_lock:
+        watchlist_text = wl
+    return jsonify({"ok": True, "count": len(parse_watchlist(watchlist_text))})
 
 @app.route("/api/workers/add", methods=["POST"])
 def api_workers_add():
-    data = request.get_json(force=True)
-    amount = float(data.get("amount", 20))
-    wid = next_worker_id()
-    w = {
-        "id": wid,
-        "amount": amount,
-        "status": "idle",
-        "symbol": None,
-        "entry_px": None,
-        "tp_anchor": None,
-        "trail_max": None,
-        "started_at": None,
-        "enabled": True,
-        "note": "",
-        "last_scan": None,
-    }
-    state["workers"][wid] = w
-    if state["running"]:
-        threading.Thread(target=worker_loop, args=(wid,), daemon=True).start()
-    return jsonify({"ok": True, "worker": w})
+    data = request.get_json(force=True, silent=True) or {}
+    amt = float(data.get("amount", 20))
+    with state_lock:
+        new_id = (max(workers.keys()) + 1) if workers else 1
+        workers[new_id] = Worker(id=new_id, amount=amt, status="scanning", started_at=utcnow_iso())
+    return jsonify({"ok": True, "id": new_id})
 
-@app.route("/api/workers/remove", methods=["POST"])
-def api_workers_remove():
-    data = request.get_json(force=True)
-    wid = int(data.get("id", 0))
-    w = state["workers"].pop(wid, None)
-    if w:
-        w["enabled"] = False
+@app.route("/api/workers/clear", methods=["POST"])
+def api_workers_clear():
+    with state_lock:
+        workers.clear()
     return jsonify({"ok": True})
 
-# =========================
-# Run
-# =========================
+@app.route("/api/status")
+def api_status():
+    with state_lock:
+        prof = profit_snapshot()
+        w = {wid: vars(wk) | {"position": vars(wk.position) if wk.position else None} for wid, wk in workers.items()}
+        return jsonify({
+            "running": running,
+            "mode": mode,
+            "watchlist": watchlist_text,
+            "workers": w,
+            "profit": prof
+        })
+
+@app.route("/api/trades")
+def api_trades():
+    with state_lock:
+        return jsonify(trades)
+
+@app.route("/api/debug")
+def api_debug():
+    limit = int(request.args.get("limit", "300"))
+    with state_lock:
+        return jsonify(debug_events[-limit:])
+
+@app.route("/api/debug/toggle", methods=["POST"])
+def api_debug_toggle():
+    global debug_on
+    data = request.get_json(force=True, silent=True) or {}
+    turn_on = bool(data.get("on", True))
+    with state_lock:
+        debug_on = turn_on
+    return jsonify({"ok": True, "debug": debug_on})
+
+
+# =====================
+# Startup
+# =====================
+def start_threads_once():
+    t = threading.Thread(target=bot_loop, daemon=True)
+    t.start()
+
+start_threads_once()
+
 if __name__ == "__main__":
-    # start with one worker by default for demos
-    if not state["workers"]:
-        for _ in range(0):
-            requests.post("http://localhost:8080/api/workers/add", json={"amount": 20})
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    # Local run: http://127.0.0.1:5000/
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
