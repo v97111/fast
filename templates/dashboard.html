@@ -7,7 +7,7 @@
   <style>
     :root {
       --bg:#0b1020; --card:#111831; --muted:#9aa4b2; --text:#e8ecf1;
-      --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058; --warn:#f59e0b;
+      --good:#10b981; --bad:#ef4444; --accent:#3b82f6; --chip:#1f2a48; --border:#223058;
     }
     *{box-sizing:border-box}
     html,body{max-width:100%;overflow-x:hidden}
@@ -35,8 +35,7 @@
     .kv{display:grid;grid-template-columns:140px 1fr;gap:6px}
     @media (max-width:480px){.kv{grid-template-columns:1fr}}
     .muted{color:var(--muted)}
-    code,.chip{white-space:normal;word-break:break-word;overflow-wrap:anywhere}
-    .chip{background:var(--chip);padding:2px 8px;border-radius:999px;display:inline-block}
+    .chip{background:var(--chip);padding:2px 8px;border-radius:999px;display:inline-block;white-space:normal;overflow-wrap:anywhere}
     .chips{display:flex;flex-wrap:wrap;gap:6px;max-width:100%}
     .spinner{width:16px;height:16px;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .9s linear infinite;display:inline-block;vertical-align:middle}
     @keyframes spin{to{transform:rotate(360deg)}}
@@ -49,7 +48,6 @@
     input[type="number"]{background:#0e1631;border:1px solid var(--border);border-radius:10px;color:var(--text);padding:8px 10px;width:120px}
     details{background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
     summary{cursor:pointer;color:var(--accent);font-weight:600;outline:none}
-    .toggle{display:inline-flex;align-items:center;gap:8px}
     .switch{position:relative;display:inline-block;width:42px;height:22px}
     .switch input{display:none}
     .slider{position:absolute;cursor:pointer;inset:0;background:#32406f;border-radius:999px;transition:.2s}
@@ -81,7 +79,7 @@
       <div class="card">
         <h3 style="margin:0 0 10px">Global Status</h3>
         <div class="kv" id="global">
-          <div>Mode:</div><div><span id="modeTxt">safe</span> <span class="muted">(drop {{ drop_pct }}%)</span></div>
+          <div>Mode:</div><div><span id="modeTxt">safe</span> <span class="muted">(Safe dip ≥ {{ safe_drop_pct }}%, strict EMA/vol)</span></div>
 
           <div>Watchlist:</div>
           <div>Valid <span id="wlc">-</span> <span class="muted">(from <span id="wlt">-</span>)</span></div>
@@ -93,7 +91,7 @@
           <div><span id="p_usd">-</span> <span class="muted">(<span id="p_pct">-</span>)</span></div>
 
           <div>Exit Rules:</div>
-          <div><code>TP {{ tp_trigger_pct }}% → Trail {{ trail_pct }}% | SL {{ sl_pct }}% | Time {{ time_limit }}m</code></div>
+          <div><code>Hard TP +{{ '%.2f' % tp_trigger_pct }}% → Trail arm +{{ '%.2f' % trail_arm }}% / giveback {{ '%.2f' % trail_pct }}% | SL {{ '%.2f' % sl_pct }}% | Time {{ time_limit }}m</code></div>
 
           <div>Watchlist Symbols:</div>
           <div>
@@ -116,13 +114,11 @@
           <summary>Debug Panel (why buys are rejected)</summary>
           <div class="card" style="margin-top:10px">
             <div class="row" style="justify-content:space-between; margin-bottom:8px">
-              <div class="toggle">
-                <label class="switch">
-                  <input type="checkbox" id="dbgToggle" checked onchange="toggleDebug(this.checked)">
-                  <span class="slider"></span>
-                </label>
-                <span>Debug: <strong id="dbgState">ON</strong></span>
-              </div>
+              <label style="display:flex;align-items:center;gap:10px">
+                <span>Debug:</span>
+                <span class="switch"><input type="checkbox" id="dbgToggle" checked onchange="toggleDebug(this.checked)"><span class="slider"></span></span>
+                <strong id="dbgState">ON</strong>
+              </label>
               <div class="row">
                 <button class="btn add" onclick="copyDebug()">Copy JSON</button>
                 <a class="btn start" href="/api/debug/export?format=csv" target="_blank" rel="noopener">Download CSV</a>
@@ -190,7 +186,7 @@
     }
     async function copyDebug(){
       try{
-        const r = await fetch('/api/debug');       // <-- fixed: fetch the correct endpoint
+        const r = await fetch('/api/debug');
         const data = await r.json();
         const txt = JSON.stringify(data.events || [], null, 2);
         await navigator.clipboard.writeText(txt);
@@ -260,6 +256,7 @@
         document.getElementById('modeTxt').textContent = st.mode || 'safe';
         document.getElementById('btnSafe').classList.toggle('active', st.mode==='safe');
         document.getElementById('btnFast').classList.toggle('active', st.mode==='fast');
+
         document.getElementById('dbgToggle').checked = !!st.debug_enabled;
         document.getElementById('dbgState').textContent = st.debug_enabled ? 'ON' : 'OFF';
 
