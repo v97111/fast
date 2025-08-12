@@ -1,630 +1,648 @@
-# -*- coding: utf-8 -*-
-"""
-Fast-cycle Binance bot + Flask dashboard (multi-worker)
-
-SAFE mode (realistic + conservative):
-- EMA50 strict, volume >= 1.2x avg10
-- Pattern: previous closed bar dips >= 0.6% and next closed bar closes above previous HIGH
-
-FAST mode (easier):
-- EMA >= 99.2% of EMA50
-- Volume >= 0.85x avg10 OR last volume is top-3 among last 10 closed bars
-- Pattern: bounce-only (last close > previous close)
-
-Exits for both:
-- Hard TP +1.25% (to net >= ~1% after fees), then trailing arms at +1.6% with 0.4% giveback
-- Stop-loss -1.5%, Max trade time 45m
-
-Dashboard:
-- Mobile friendly, worker cards, live unrealized PnL, time-in-trade, debug (toggle/copy/export), trade history
-"""
-import os, time, csv, math, threading, sys
+# main.py
+import os, time, math, threading, json, traceback, csv
+from collections import deque, defaultdict
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict, deque
-from typing import Dict, List
-from flask import Flask, render_template, jsonify, request, Response
+
+from flask import Flask, jsonify, request, send_file, Response
 from dotenv import load_dotenv
-from binance.client import Client
 
-# ------------------ Watchlist ------------------
-WATCHLIST: List[str] = [
-    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","TRXUSDT","LINKUSDT",
-    "DOTUSDT","MATICUSDT","TONUSDT","OPUSDT","ARBUSDT","SUIUSDT","LTCUSDT","BCHUSDT","ATOMUSDT","NEARUSDT",
-    "APTUSDT","FILUSDT","HBARUSDT","ICPUSDT","GALAUSDT","CFXUSDT","FETUSDT","RNDRUSDT","INJUSDT","FTMUSDT",
-    "THETAUSDT","MANAUSDT","SANDUSDT","AXSUSDT","FLOWUSDT","KAVAUSDT","ROSEUSDT","C98USDT","GMTUSDT","ANKRUSDT",
-    "CHZUSDT","CRVUSDT","DYDXUSDT","ENSUSDT","LRCUSDT","ONEUSDT","QTUMUSDT","STGUSDT","WAVESUSDT","ZILUSDT",
-    "MINAUSDT","PEPEUSDT","JOEUSDT","HIGHUSDT","IDEXUSDT","ILVUSDT","MAGICUSDT","LINAUSDT","OCEANUSDT","IMXUSDT",
-    "RLCUSDT","GLMRUSDT","CELOUSDT","COTIUSDT","ACHUSDT","API3USDT","ALGOUSDT","BADGERUSDT","BANDUSDT","BATUSDT",
-    "BICOUSDT","BLZUSDT","COMPUSDT","CTKUSDT","DASHUSDT","DENTUSDT","DODOUSDT","ELFUSDT","ENJUSDT","EOSUSDT",
-    "ETCUSDT","FLMUSDT","FXSUSDT","GRTUSDT","HOTUSDT","ICXUSDT","IOSTUSDT","IOTAUSDT","KLAYUSDT","KNCUSDT",
-    "MASKUSDT","MKRUSDT","MTLUSDT","NKNUSDT","OGNUSDT","OMGUSDT","PHAUSDT","PYRUSDT","REIUSDT","RENUSDT",
-    "SKLUSDT","SPELLUSDT","STMXUSDT","STORJUSDT","TLMUSDT","UMAUSDT","UNIUSDT","VETUSDT","XLMUSDT","XTZUSDT",
-    "YFIUSDT","ZRXUSDT"
-]
-
-# ------------------ Config ------------------
-INTERVAL = Client.KLINE_INTERVAL_1MINUTE
-KLIMIT   = 120
-
-# Exits (guarantee >= ~1% TP first, then trail)
-TAKE_PROFIT_MIN_PCT   = 0.0125  # +1.25% hard TP to cover round-trip fees
-TRAIL_ARM_PCT         = 0.0160  # arm trailing only if >= +1.6%
-TRAIL_GIVEBACK_PCT    = 0.0040  # 0.4% giveback; worst trailing ~+1.2%
-STOP_LOSS_PCT         = 0.015   # -1.5%
-MAX_TRADE_MINUTES     = 45
-
-# Entry filters
-MIN_DAY_VOLATILITY_PCT = 0.5     # 24h range >= 0.5%
-SAFE_DROP_PCT           = 0.006   # 0.6% single-bar dip for SAFE only
-COOLDOWN_MINUTES        = 8
-
-# Loop timing
-POLL_SECONDS_IDLE   = 2
-POLL_SECONDS_ACTIVE = 2
-
-# Logging / debug
-LOG_FILE             = os.getenv("LOG_FILE", "fast_cycle_trades.csv")
-RECENT_TRADES_LIMIT  = 500
-DEBUG_BUFFER         = 600
-
-# ------------------ Helpers ------------------
-def ema(values, period):
-    if len(values) < period or period <= 0: return None
-    k = 2.0/(period+1.0); e = values[0]
-    for v in values[1:]: e = v*k + e*(1-k)
-    return e
-
-def round_to(value, step):
-    if step == 0: return value
-    return math.floor(value/step)*step
-
-def now_utc(): return datetime.now(timezone.utc)
-
-def log_row(row):
-    newfile = not os.path.isfile(LOG_FILE)
-    with open(LOG_FILE, "a", newline="") as f:
-        w = csv.writer(f)
-        if newfile:
-            w.writerow(["time","symbol","action","price","qty","pnl_pct","note","worker_id"])
-        w.writerow(row)
-
-def read_csv_tail(path, n=RECENT_TRADES_LIMIT):
-    if not os.path.isfile(path): return []
-    with open(path, newline="") as f:
-        rows = list(csv.reader(f))
-    if len(rows) <= 1: return []
-    header, body = rows[0], rows[1:]
-    body = body[-n:]
-    return [dict(zip(header, r)) for r in body][::-1]
-
-# ------------------ Binance ops ------------------
-def build_client():
-    load_dotenv()
-    key = os.getenv("BINANCE_API_KEY", "")
-    sec = os.getenv("BINANCE_API_SECRET", "")
-    if not key or not sec:
-        print("ERROR: Set BINANCE_API_KEY and BINANCE_API_SECRET"); sys.exit(1)
-    client = Client(key, sec)
-    if os.getenv("BINANCE_TESTNET", "true").lower() in ("1","true","yes","y"):
-        client.API_URL = "https://testnet.binance.vision/api"
-        print("[INFO] Using TESTNET")
-    else:
-        print("[INFO] Using LIVE")
-    return client
-
-def get_symbol_filters(client, symbol):
-    info = client.get_symbol_info(symbol)
-    if not info or info.get("status") != "TRADING":
-        raise RuntimeError(f"{symbol} not tradable")
-    tick = lot = 0.0; min_notional = 0.0
-    for f in info["filters"]:
-        if f["filterType"] == "PRICE_FILTER": tick = float(f["tickSize"])
-        elif f["filterType"] == "LOT_SIZE":   lot = float(f["stepSize"])
-        elif f["filterType"] == "NOTIONAL":   min_notional = float(f.get("minNotional", 0.0))
-    return tick, lot, min_notional
-
-def get_price(client, symbol): return float(client.get_symbol_ticker(symbol=symbol)["price"])
-
-def get_24h_stats(client, symbol):
-    t = client.get_ticker(symbol=symbol)
-    last = float(t["lastPrice"]); high = float(t["highPrice"]); low = float(t["lowPrice"])
-    move_pct = ((high-low)/low*100.0) if low>0 else 0.0
-    return last, move_pct
-
-def get_klines(client, symbol, interval=INTERVAL, limit=KLIMIT):
-    raw = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    return [{
-        "open_time": int(k[0]),
-        "open":  float(k[1]),
-        "high":  float(k[2]),
-        "low":   float(k[3]),
-        "close": float(k[4]),
-        "volume":float(k[5]),
-    } for k in raw]
-
-def filter_valid_symbols(client, watchlist):
-    info = client.get_exchange_info()
-    valid = {s["symbol"] for s in info["symbols"] if s.get("status") == "TRADING"}
-    return [s for s in watchlist if s in valid], len(watchlist)
-
-def get_all_prices(client) -> Dict[str, float]:
-    return {t["symbol"]: float(t["price"]) for t in client.get_all_tickers()}
-
-def get_net_usdt_value(client) -> float:
-    acct = client.get_account(); prices = get_all_prices(client); total = 0.0
-    for b in acct["balances"]:
-        asset = b["asset"]; amt = float(b["free"]) + float(b["locked"])
-        if amt == 0.0: continue
-        if asset == "USDT": total += amt
-        else:
-            pair = asset + "USDT"; p = prices.get(pair)
-            if p: total += amt*p
-    return total
-
-# ------------------ Signal Policy ----------------
-def make_policy(mode:str):
-    if mode == "fast":
-        return {
-            "ema_relax": 0.996,      # >= 99.2% of EMA50
-            "vol_mult": 1.0,        # >= 0.85× avg10 OR top-3 volume
-            "min_day_vol": MIN_DAY_VOLATILITY_PCT,
-            "pattern": "none" # last close > prev close
-        }
-    else:  # SAFE (strict EMA/vol; realistic 0.6% dip + prev high recovery)
-        return {
-            "ema_relax": 1.0,        # strictly above EMA50
-            "vol_mult": 1.2,         # require a spike
-            "min_day_vol": MIN_DAY_VOLATILITY_PCT,
-            "pattern": "prev_high"   # previous bar dips >= 0.6%, next close > prev high
-        }
-
-def evaluate_buy_checks(client, symbol, cache, policy):
-    # 24h volatility
-    _, day_move = get_24h_stats(client, symbol)
-    day_ok = day_move >= policy["min_day_vol"]
-
-    # klines (cached)
-    candles = cache.get(symbol)
-    if candles is None:
-        candles = get_klines(client, symbol)
-        cache[symbol] = candles
-    if len(candles) < 60:
-        return {"ok": False, "reason": "few_candles", "day_ok": day_ok,
-                "ema_ok": False, "vol_ok": False, "pattern_ok": False}
-
-    closes = [c["close"] for c in candles]
-    vols   = [c["volume"] for c in candles]
-
-    # EMA50 trend
-    ema50  = ema(closes[-60:], 50)
-    ema_ok = (ema50 is not None) and (closes[-1] >= ema50 * policy["ema_relax"])
-
-    # Volume
-    vol_ok = False
-    if len(vols) >= 11:
-        last_closed_vol = vols[-2]  # last CLOSED bar
-        avg10 = sum(vols[-12:-2]) / 10.0
-        if policy["vol_mult"] >= 1.0:
-            vol_ok = (avg10 > 0) and (last_closed_vol >= policy["vol_mult"] * avg10)
-        else:
-            # fast mode: soft threshold OR top-3 rank
-            cond_soft = (avg10 > 0) and (last_closed_vol >= policy["vol_mult"] * avg10)
-            block = vols[-12:-2]
-            top3 = sorted(block, reverse=True)[:3] if block else []
-            cond_rank = bool(block) and (last_closed_vol >= (top3[-1] if len(top3)==3 else (top3[-1] if top3 else 0)))
-            vol_ok = bool(cond_soft or cond_rank)
-
-# --- Pattern Check ---
-pattern_ok = False
-
-if policy["pattern"] == "prev_high":  # Safe mode
-    if len(candles) >= 2:
-        c_prev = candles[-2]
-        c_last = candles[-1]
-        dipped = (c_prev["close"] > 0) and ((c_prev["close"] - c_prev["low"]) / c_prev["close"] >= SAFE_DROP_PCT)
-        recovered = c_last["close"] > c_prev["high"]
-        pattern_ok = dipped and recovered
-
-elif policy["pattern"] == "none":  
-    # Extra filter so not all coins pass immediately
-    if len(candles) >= 2:
-        c_prev = candles[-2]
-        c_last = candles[-1]
-        small_gain = (c_last["close"] - c_prev["close"]) / c_prev["close"] >= 0.002  # 0.2% mini gain filter
-        pattern_ok = small_gain
-
-else:  # bounce_only (FAST)
-    if len(candles) >= 3:
-        last = candles[-2]
-        prev = candles[-3]
-        pattern_ok = last["close"] > prev["close"]
-
-    
-
-    # Reason
-    if not day_ok:      reason = "low_24h_move"
-    elif not ema_ok:    reason = "below_ema50"
-    elif not vol_ok:    reason = "no_vol_spike"
-    elif not pattern_ok:reason = "no_pullback_recovery"
-    else:               reason = "ok"
-
-    return {"ok": (reason == "ok"), "reason": reason,
-            "day_ok": day_ok, "ema_ok": ema_ok, "vol_ok": vol_ok, "pattern_ok": pattern_ok}
-
-# ------------------ Orders ----------------------
-def market_buy_by_quote(client, symbol, quote_usdt):
-    price = get_price(client, symbol)
-    _, lot, min_notional = get_symbol_filters(client, symbol)
-    qty = round_to(quote_usdt / price, lot)
-    if qty <= 0: raise RuntimeError("Quantity rounded to 0; increase amount.")
-    notional = price * qty
-    min_req = max(10.0, min_notional)
-    if notional < min_req:
-        qty = round_to((min_req / price), lot)
-    order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
-    fills = order.get("fills", [])
-    if fills:
-        spent = sum(float(f["price"])*float(f["qty"]) for f in fills)
-        got   = sum(float(f["qty"]) for f in fills)
-        avg_price = spent/got; qty = got
-    else:
-        avg_price = price
-    return avg_price, qty
-
-def market_sell_qty(client, symbol, qty):
-    _, lot, _ = get_symbol_filters(client, symbol)
-    qty = round_to(qty, lot)
-    order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
-    fills = order.get("fills", [])
-    if fills:
-        earned = sum(float(f["price"])*float(f["qty"]) for f in fills)
-        sold   = sum(float(f["qty"]) for f in fills)
-        avg_price = earned/sold; qty = sold
-    else:
-        avg_price = get_price(client, symbol)
-    return avg_price, qty
-
-# ------------------ Multi-Worker ----------------
-class WorkerState:
-    def __init__(self, wid: int, quote: float):
-        self.id = wid; self.quote = quote
-        self.status = "scanning"
-        self.symbol = None; self.last_pnl = None
-        self.note = "Scanning watchlist…"; self.updated = now_utc().isoformat()
-        # live-trade context for UI
-        self.entry_price = None
-        self.qty = None
-        self.started = None  # datetime
-
-class FastCycleBot:
-    def __init__(self):
-        self._client = None
-        self._workers: Dict[int, threading.Thread] = {}
-        self._worker_state: Dict[int, WorkerState] = {}
-        self._stop_flags: Dict[int, threading.Event] = {}
-        self._lock = threading.Lock()
-        self._active_symbols = set()
-        self._candles_cache = {}
-        self._last_sell_time = defaultdict(lambda: datetime.min.replace(tzinfo=timezone.utc))
-        self._running = False
-
-        self._watchlist_total = 0; self._watchlist_count = 0
-        self.start_net_usdt = None; self.current_net_usdt = None
-
-        self._metrics_thread = None; self._metrics_stop = threading.Event()
-
-        self.debug_enabled = True
-        self._debug_events = deque(maxlen=DEBUG_BUFFER)
-
-        self.mode = "safe"  # "safe" or "fast"
-
-    # ---- lifecycle ----
-    def start_core(self):
-        if self._running: return
-        self._client = build_client()
-        global WATCHLIST
-        WATCHLIST, total = filter_valid_symbols(self._client, WATCHLIST)
-        self._watchlist_total = total; self._watchlist_count = len(WATCHLIST)
-        print(f"[INFO] Watchlist filtered: {self._watchlist_count} valid (from {total})")
-        try:
-            self.start_net_usdt = get_net_usdt_value(self._client)
-        except Exception as e:
-            print("[WARN] Could not fetch start net value:", e); self.start_net_usdt = None
-        self._metrics_stop.clear()
-        self._metrics_thread = threading.Thread(target=self._refresh_metrics_loop, daemon=True)
-        self._metrics_thread.start()
-        self._running = True
-
-    def stop_core(self):
-        for wid, ev in list(self._stop_flags.items()): ev.set()
-        self._workers.clear(); self._stop_flags.clear(); self._worker_state.clear()
-        self._active_symbols.clear(); self._running = False; self._metrics_stop.set()
-
-    def _refresh_metrics_loop(self):
-        while not self._metrics_stop.is_set():
-            try:
-                if self._client: self.current_net_usdt = get_net_usdt_value(self._client)
-            except Exception: pass
-            time.sleep(6)
-
-    def _debug_push(self, symbol, wid, flags):
-        if not self.debug_enabled or not flags: return
-        self._debug_events.append({
-            "time": now_utc().isoformat(),
-            "symbol": symbol, "worker_id": wid, "reason": flags.get("reason"),
-            "day_ok": flags.get("day_ok"), "ema_ok": flags.get("ema_ok"),
-            "vol_ok": flags.get("vol_ok"), "pattern_ok": flags.get("pattern_ok"),
-        })
-
-    # ---- workers ----
-    def add_worker(self, quote_amount: float) -> int:
-        if not self._running: self.start_core()
-        wid = 1
-        with self._lock:
-            while wid in self._workers: wid += 1
-            state = WorkerState(wid, float(quote_amount))
-            self._worker_state[wid] = state
-            stop_ev = threading.Event(); self._stop_flags[wid] = stop_ev
-            t = threading.Thread(target=self._worker_loop, args=(wid, stop_ev), daemon=True)
-            self._workers[wid] = t; t.start()
-        return wid
-
-    def stop_worker(self, wid: int):
-        ev = self._stop_flags.get(wid)
-        if ev: ev.set()
-
-    def _update_state(self, wid: int, **kwargs):
-        st = self._worker_state.get(wid)
-        if not st: return
-        for k, v in kwargs.items(): setattr(st, k, v)
-        st.updated = now_utc().isoformat()
-
-    def _eligible_symbol(self, sym: str) -> bool:
-        return sym not in self._active_symbols and (now_utc() - self._last_sell_time[sym]).total_seconds() >= COOLDOWN_MINUTES*60
-
-    def _worker_loop(self, wid: int, stop_ev: threading.Event):
-        st = self._worker_state[wid]; client = self._client
-        while not stop_ev.is_set():
-            try:
-                policy = make_policy(self.mode)
-
-                # SCAN
-                self._update_state(wid, status="scanning", symbol=None, note="Scanning watchlist…")
-                picked = None
-                for sym in WATCHLIST:
-                    if stop_ev.is_set(): break
-                    if not self._eligible_symbol(sym): continue
-                    flags = evaluate_buy_checks(client, sym, self._candles_cache, policy)
-                    if flags["ok"]:
-                        picked = (sym, flags["reason"]); break
-                    else:
-                        self._debug_push(sym, wid, flags)
-                    time.sleep(0.05)
-                if not picked:
-                    time.sleep(POLL_SECONDS_IDLE); continue
-
-                sym, reason = picked
-                with self._lock:
-                    if sym in self._active_symbols: continue
-                    self._active_symbols.add(sym)
-
-                # BUY
-                self._update_state(wid, status="buying", symbol=sym, note=f"BUY signal ({reason})")
-                entry, qty = market_buy_by_quote(client, sym, st.quote)
-                start = now_utc()
-                log_row([start.isoformat(), sym, "BUY", f"{entry:.8f}", f"{qty:.8f}", "", "worker", wid])
-
-                # store trade context for UI
-                st.symbol = sym
-                st.entry_price = entry
-                st.qty = qty
-                st.started = start
-
-                hard_tp  = entry * (1 + TAKE_PROFIT_MIN_PCT)
-                trail_arm= entry * (1 + TRAIL_ARM_PCT)
-                stop_loss= entry * (1 - STOP_LOSS_PCT)
-                peak = entry; trailing = False
-
-                # IN POSITION
-                self._update_state(wid, status="in_position", note=f"In trade {sym}")
-                while not stop_ev.is_set():
-                    price = get_price(client, sym); ts = now_utc()
-                    if price > peak: peak = price
-
-                    # Hard take-profit first (guarantee >= ~1% net)
-                    if price >= hard_tp and not trailing:
-                        self._update_state(wid, status="selling", note=f"Hard TP on {sym}")
-                        exitp, sold = market_sell_qty(client, sym, qty)
-                        pnl = (exitp/entry - 1)*100.0
-                        log_row([ts.isoformat(), sym, "SELL_TP_HARD", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", "hard-tp", wid])
-                        self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
-                        # clear context
-                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
-                        break
-
-                    # Arm trailing at stronger profit
-                    if not trailing and price >= trail_arm:
-                        trailing = True; self._update_state(wid, note=f"Trailing armed on {sym}")
-
-                    # Trailing exit
-                    if trailing:
-                        floor = peak * (1 - TRAIL_GIVEBACK_PCT)
-                        if price <= floor:
-                            self._update_state(wid, status="selling", note=f"Trailing exit on {sym}")
-                            exitp, sold = market_sell_qty(client, sym, qty)
-                            pnl = (exitp/entry - 1)*100.0
-                            log_row([ts.isoformat(), sym, "SELL_TP_TRAIL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", "trailing", wid])
-                            self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
-                            st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
-                            break
-
-                    # Stop-loss
-                    if price <= stop_loss:
-                        self._update_state(wid, status="selling", note=f"Stop-loss on {sym}")
-                        exitp, sold = market_sell_qty(client, sym, qty)
-                        pnl = (exitp/entry - 1)*100.0
-                        log_row([ts.isoformat(), sym, "SELL_SL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", "stop-loss", wid])
-                        self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
-                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
-                        break
-
-                    # Time exit
-                    if ts - start >= timedelta(minutes=MAX_TRADE_MINUTES):
-                        self._update_state(wid, status="selling", note=f"Time exit on {sym}")
-                        exitp, sold = market_sell_qty(client, sym, qty)
-                        pnl = (exitp/entry - 1)*100.0
-                        log_row([ts.isoformat(), sym, "SELL_TIME", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"time>{MAX_TRADE_MINUTES}m", wid])
-                        self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
-                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
-                        break
-
-                    time.sleep(POLL_SECONDS_ACTIVE)
-
-                with self._lock: self._active_symbols.discard(sym)
-                self._update_state(wid, status="cooldown", symbol=None, note=f"Cooldown {COOLDOWN_MINUTES}m")
-                time.sleep(2)
-
-            except Exception as e:
-                self._update_state(wid, status="error", note=f"{type(e).__name__}: {e}")
-                time.sleep(3)
-
-        self._update_state(wid, status="stopped", note="Stopped")
-
-    # ---- status for UI ----
-    def dashboard_state(self):
-        start_val = self.start_net_usdt; cur_val = self.current_net_usdt
-        profit_usd = profit_pct = None
-        if start_val is not None and cur_val is not None:
-            profit_usd = cur_val - start_val
-            profit_pct = (profit_usd / start_val * 100.0) if start_val > 0 else None
-
-        workers = []
-        for wid, st in self._worker_state.items():
-            # defaults
-            unreal_pct = unreal_usd = None
-            cur_price = tp_price = trail_arm_price = sl_price = None
-            started_iso = st.started.isoformat() if st.started else None
-
-            # compute live metrics if in position
-            if st.status == "in_position" and st.symbol and st.entry_price and st.qty:
-                try:
-                    cur_price = get_price(self._client, st.symbol)
-                    unreal_pct = (cur_price / st.entry_price - 1.0) * 100.0
-                    unreal_usd = (cur_price - st.entry_price) * st.qty
-                    tp_price = st.entry_price * (1.0 + TAKE_PROFIT_MIN_PCT)
-                    trail_arm_price = st.entry_price * (1.0 + TRAIL_ARM_PCT)
-                    sl_price = st.entry_price * (1.0 - STOP_LOSS_PCT)
-                except Exception:
-                    pass
-
-            workers.append({
-                "id": st.id, "quote": st.quote, "status": st.status, "symbol": st.symbol,
-                "last_pnl": st.last_pnl, "note": st.note, "updated": st.updated,
-                # live ctx
-                "entry_price": st.entry_price, "qty": st.qty, "started": started_iso,
-                "cur_price": cur_price, "unreal_pct": unreal_pct, "unreal_usd": unreal_usd,
-                "tp_price": tp_price, "trail_arm_price": trail_arm_price, "sl_price": sl_price
-            })
-        workers.sort(key=lambda x: x["id"])
-
-        return {
-            "running": self._running,
-            "watchlist_count": self._watchlist_count, "watchlist_total": self._watchlist_total,
-            "start_net_usdt": start_val, "current_net_usdt": cur_val,
-            "profit_usd": profit_usd, "profit_pct": profit_pct,
-            "workers": workers, "mode": self.mode, "debug_enabled": self.debug_enabled
-        }
-
-# ------------------ Flask ------------------
-app = Flask(__name__, template_folder="templates")
-bot = FastCycleBot()
-
-@app.route("/")
-def dashboard():
-    recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
-    state = bot.dashboard_state()
-    return render_template(
-        "dashboard.html",
-        state=state,
-        recent_trades=recent,
-        watchlist_list=WATCHLIST,
-        tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
-        trail_pct=(TRAIL_GIVEBACK_PCT*100),
-        trail_arm=(TRAIL_ARM_PCT*100),
-        sl_pct=(STOP_LOSS_PCT*100),
-        time_limit=MAX_TRADE_MINUTES,
-        min_day_vol=MIN_DAY_VOLATILITY_PCT,
-        safe_drop_pct=(SAFE_DROP_PCT*100),
-        recent_limit=RECENT_TRADES_LIMIT
-    )
-
-@app.get("/api/status")
-def api_status(): return jsonify(bot.dashboard_state())
-
-@app.get("/api/trades")
-def api_trades(): return jsonify({"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
-
-# ---- Debug API ----
-@app.get("/api/debug")
-def api_debug():
-    events = list(bot._debug_events)[-200:]
-    counts = defaultdict(int)
-    for e in events: counts[e["reason"]] += 1
-    return jsonify({
-        "enabled": bot.debug_enabled,
-        "events": events[::-1],
-        "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
+# Optional: real client only if SIMULATE=false
+BINANCE_READY = False
+try:
+    from binance.client import Client
+    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
+    BINANCE_READY = True
+except Exception:
+    BINANCE_READY = False
+
+load_dotenv()
+
+# ====== CONFIG ======
+PORT = int(os.getenv("PORT", "8000"))
+MODE = os.getenv("MODE", "fast").lower()      # "fast" or "safe"
+SIMULATE = os.getenv("SIMULATE", "true").lower() == "true"
+API_KEY = os.getenv("BINANCE_API_KEY", "")
+API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+
+QUOTE = os.getenv("QUOTE", "USDT")            # quote currency
+INTERVAL = os.getenv("INTERVAL", "1m")        # klines interval
+CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "120"))
+
+# Worker / scanning
+WORKERS = int(os.getenv("WORKERS", "6"))
+SCAN_SLEEP = float(os.getenv("SCAN_SLEEP", "0.25"))  # seconds between symbol scans per worker
+REFRESH_SYMBOLS_EVERY = int(os.getenv("REFRESH_SYMBOLS_EVERY", "600"))  # seconds
+
+# Risk & entries
+MIN_DAY_VOLATILITY_PCT = float(os.getenv("MIN_DAY_VOLATILITY_PCT", "0.02"))  # 2% 24h range/close minimum
+SAFE_DROP_PCT = float(os.getenv("SAFE_DROP_PCT", "0.008"))  # 0.8% dip for prev_high pattern (safe mode)
+EMA_LEN = int(os.getenv("EMA_LEN", "50"))
+
+# Fast/Safe exits
+# Take-profit aims for ~+1% net after fees; adjust if your fee differs.
+TP_GROSS = float(os.getenv("TP_GROSS", "0.0125"))        # +1.25% hard TP
+TRAIL_ARM = float(os.getenv("TRAIL_ARM", "0.016"))       # arm trail after +1.6%
+TRAIL_GIVEBACK = float(os.getenv("TRAIL_GIVEBACK", "0.004"))  # -0.4% from peak
+STOP_LOSS = float(os.getenv("STOP_LOSS", "0.015"))       # -1.5% SL
+MAX_HOLD_MIN = int(os.getenv("MAX_HOLD_MIN", "45"))      # 45 min timeout
+
+# Per-card spend (in quote asset)
+DEFAULT_SPEND = float(os.getenv("DEFAULT_SPEND", "20"))  # e.g., 20 USDT per card
+
+# Debug
+DEBUG_BUFFER_MAX = int(os.getenv("DEBUG_BUFFER_MAX", "20000"))
+DEBUG_ENABLED_DEFAULT = os.getenv("DEBUG_ENABLED", "true").lower() == "true"
+
+# ====== APP STATE ======
+app = Flask(__name__)
+
+lock = threading.RLock()
+debug_enabled = DEBUG_ENABLED_DEFAULT
+debug_events = deque(maxlen=DEBUG_BUFFER_MAX)     # rows for /api/debug
+trades = []                                       # closed trades
+open_positions = {}                                # symbol -> dict(position)
+watch_symbols = []                                 # list of symbols being scanned
+active_cards = {}                                  # card_id -> dict(config/state)
+next_card_id = 1
+
+start_balances = {"quote": 1000.0, "assets": 0.0}  # simulated starting balances
+balances = {"quote": 1000.0}                       # simulated balances (USDT)
+asset_balances = defaultdict(float)                # simulated balances per base asset
+fees_rate = 0.001                                  # 0.1% taker as rough default
+
+# Real Binance client (only if SIMULATE=false and keys present)
+client = None
+if not SIMULATE and BINANCE_READY and API_KEY and API_SECRET:
+    client = Client(API_KEY, API_SECRET)
+
+# ====== UTILS ======
+def utcnow_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def add_debug(reason, symbol, worker_id, day_ok, ema_ok, vol_ok, pattern_ok):
+    if not debug_enabled:
+        return
+    debug_events.append({
+        "time": utcnow_iso(),
+        "worker_id": worker_id,
+        "symbol": symbol,
+        "reason": reason,
+        "day_ok": day_ok,
+        "ema_ok": ema_ok,
+        "vol_ok": vol_ok,
+        "pattern_ok": pattern_ok
     })
 
-@app.post("/api/debug/toggle")
-def api_debug_toggle():
-    data = request.get_json(force=True, silent=True) or {}
-    bot.debug_enabled = bool(data.get("enabled", True))
-    return jsonify({"ok": True, "enabled": bot.debug_enabled})
+def ema(values, n):
+    if not values or n <= 0: return 0.0
+    k = 2.0 / (n + 1)
+    e = values[0]
+    for v in values[1:]:
+        e = v * k + e * (1 - k)
+    return e
 
-@app.get("/api/debug/export")
+def pct(a, b):
+    if b == 0: return 0.0
+    return (a - b) / b
+
+def get_symbols_from_binance():
+    # Pull spot USDT pairs with trading status TRADING
+    syms = []
+    if client:
+        ex = client.get_exchange_info()
+        for s in ex["symbols"]:
+            if s["status"] == "TRADING" and s["quoteAsset"] == QUOTE and s.get("isSpotTradingAllowed", True):
+                syms.append(s["symbol"])
+    else:
+        # Fallback: a compact static list (extend as you wish)
+        syms = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT",
+                "TONUSDT","DOTUSDT","LINKUSDT","UNIUSDT","MATICUSDT","LTCUSDT","ATOMUSDT",
+                "NEARUSDT","APTUSDT","OPUSDT","ARBUSDT","INJUSDT","SUIUSDT","ICPUSDT","FILUSDT",
+                "AAVEUSDT","COMPUSDT","ALGOUSDT","HBARUSDT","IMXUSDT","SANDUSDT","MANAUSDT",
+                "GALAUSDT","CHZUSDT","CRVUSDT","DYDXUSDT","PEPEUSDT","MINAUSDT","KAVAUSDT",
+                "CFXUSDT","STGUSDT","LRCUSDT","CELOUSDT","RLCUSDT","IDEXUSDT","AXSUSDT",
+                "ETCUSDT","XLMUSDT","ZILUSDT","ZRXUSDT","HOTUSDT","IOTAUSDT","ONEUSDT",
+                "SKLUSDT","IOSTUSDT","XTZUSDT","ROSEUSDT","KNCUSDT","C98USDT","API3USDT",
+                "ILVUSDT","BICOUSDT","BANDUSDT","DENTUSDT","MASKUSDT","MAGICUSDT","FXSUSDT",
+                "PYRUSDT","CTKUSDT","GLMRUSDT","THETAUSDT","ENSUSDT","REIUSDT","ACHUSDT",
+                "MKRUSDT","SUIUSDT","CFXUSDT"]
+    return syms
+
+def fetch_candles(symbol, interval=INTERVAL, limit=CANDLE_LIMIT):
+    if client:
+        kl = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        candles = []
+        for o in kl:
+            candles.append({
+                "open_time": o[0],
+                "open": float(o[1]),
+                "high": float(o[2]),
+                "low": float(o[3]),
+                "close": float(o[4]),
+                "volume": float(o[5]),
+                "close_time": o[6]
+            })
+        return candles
+    # Simulator: fabricate gentle waves
+    base = abs(hash(symbol)) % 10000
+    nowp = 1.0 + (time.time() % 300) / 300.0
+    price = (base/1000.0) * nowp
+    candles = []
+    for i in range(limit):
+        p = price * (1 + 0.0008 * math.sin((i + time.time()/5) * 0.8))
+        candles.append({
+            "open_time": i,
+            "open": p * (1 - 0.0005),
+            "high": p * (1 + 0.001),
+            "low": p * (1 - 0.001),
+            "close": p,
+            "volume": 100 + 10 * math.sin(i*0.7),
+            "close_time": i
+        })
+    return candles
+
+def make_policy(mode: str):
+    mode = (mode or "fast").lower()
+    if mode == "safe":
+        return {
+            "ema_relax": 1.005,             # allow up to +0.5% above EMA50
+            "vol_mult": 1.1,                 # 10% above avg vol
+            "min_day_vol": MIN_DAY_VOLATILITY_PCT,
+            "pattern": "prev_high",          # requires dip then break prev high
+        }
+    # FAST (pattern removed, but stronger EMA/vol so not everything passes)
+    return {
+        "ema_relax": 0.996,                  # price must be <= 0.4% ABOVE EMA50 (i.e., close to EMA)
+        "vol_mult": 1.0,                     # >= average volume
+        "min_day_vol": MIN_DAY_VOLATILITY_PCT,
+        "pattern": "none",                   # no strict pattern gate
+    }
+
+def evaluate_buy_checks(symbol: str, policy: dict, worker_id: int):
+    candles = fetch_candles(symbol)
+    if len(candles) < max(EMA_LEN, 3):
+        add_debug("not_enough_candles", symbol, worker_id, False, False, False, False)
+        return {"ok": False, "reason": "not_enough_candles", "pattern_ok": False, "ema_ok": False, "vol_ok": False, "day_ok": False}
+
+    closes = [c["close"] for c in candles]
+    vols = [max(0.0, c["volume"]) for c in candles]
+    last = candles[-1]
+    prev = candles[-2]
+
+    # 24h "range/close" as simple volatility proxy (use your better one if you have 24h stats)
+    full_high = max(c["high"] for c in candles[-60:])
+    full_low = min(c["low"] for c in candles[-60:])
+    day_vol = (full_high - full_low) / max(1e-9, prev["close"])
+    day_ok = day_vol >= policy["min_day_vol"]
+
+    # EMA50 and distance
+    ema50 = ema(closes[-EMA_LEN:], EMA_LEN)
+    ema_ok = last["close"] <= ema50 * policy["ema_relax"]
+
+    # Volume spike vs average of last N
+    avg_vol = sum(vols[-30:]) / max(1, len(vols[-30:]))
+    vol_ok = last["volume"] >= (avg_vol * policy["vol_mult"])
+
+    # --- Pattern Check ---
+    pattern_ok = False
+    if policy["pattern"] == "prev_high":  # Safe mode pattern
+        # require a dip in prev candle and current close > prev high
+        dipped = (prev["close"] > 0) and ((prev["close"] - prev["low"]) / prev["close"] >= SAFE_DROP_PCT)
+        recovered = last["close"] > prev["high"]
+        pattern_ok = dipped and recovered
+
+    elif policy["pattern"] == "none":
+        # light selectivity: require tiny positive momentum (avoid buying total flat/down)
+        small_gain = (last["close"] - prev["close"]) / max(1e-9, prev["close"]) >= 0.002  # +0.2%
+        pattern_ok = small_gain
+
+    else:  # "bounce_only" (kept for backward compatibility)
+        pprev = candles[-3]
+        pattern_ok = prev["close"] > pprev["close"]
+
+    ok = day_ok and ema_ok and vol_ok and pattern_ok
+    reason = "ok"
+    if not day_ok: reason = "low_24h_move"
+    elif not ema_ok: reason = "above_ema50"
+    elif not vol_ok: reason = "no_vol_spike"
+    elif not pattern_ok: reason = "no_pullback_recovery"
+
+    add_debug(reason, symbol, worker_id, day_ok, ema_ok, vol_ok, pattern_ok)
+    return {
+        "ok": ok,
+        "reason": reason,
+        "day_ok": day_ok,
+        "ema_ok": ema_ok,
+        "vol_ok": vol_ok,
+        "pattern_ok": pattern_ok,
+        "last_price": last["close"]
+    }
+
+def simulate_fill_buy(symbol, spend_quote):
+    price = fetch_candles(symbol)[-1]["close"]
+    qty = spend_quote / price
+    fee = spend_quote * fees_rate
+    spend_after_fee = spend_quote + fee
+    with lock:
+        balances["quote"] -= spend_after_fee
+        base = symbol.replace(QUOTE, "")
+        asset_balances[base] += qty
+    return {"price": price, "qty": qty, "fee_quote": fee}
+
+def simulate_fill_sell(symbol, qty):
+    price = fetch_candles(symbol)[-1]["close"]
+    gross = price * qty
+    fee = gross * fees_rate
+    receive = gross - fee
+    with lock:
+        balances["quote"] += receive
+        base = symbol.replace(QUOTE, "")
+        asset_balances[base] -= qty
+    return {"price": price, "qty": qty, "fee_quote": fee, "receive_quote": receive}
+
+def place_market_buy(symbol, spend_quote):
+    if SIMULATE or not client:
+        return simulate_fill_buy(symbol, spend_quote)
+    # Real order (quoteOrderQty requires futures on some endpoints; spot alternative: calc qty by price)
+    price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+    qty = max(0.0, (spend_quote / price))
+    order = client.order_market_buy(symbol=symbol, quantity=round(qty, 6))
+    fills = order.get("fills", [])
+    fill_price = price
+    fee = 0.0
+    for f in fills:
+        fill_price = float(f.get("price", fill_price))
+        fee += float(f.get("commission", 0.0)) * (float(f.get("commissionAsset") == QUOTE))
+    return {"price": fill_price, "qty": qty, "fee_quote": fee}
+
+def place_market_sell(symbol, qty):
+    if SIMULATE or not client:
+        return simulate_fill_sell(symbol, qty)
+    order = client.order_market_sell(symbol=symbol, quantity=round(qty, 6))
+    fills = order.get("fills", [])
+    fill_price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+    fee = 0.0
+    receive_quote = fill_price * qty
+    for f in fills:
+        fill_price = float(f.get("price", fill_price))
+        # commissionAsset may not be QUOTE; keeping simple
+    receive_quote -= receive_quote * fees_rate
+    base = symbol.replace(QUOTE, "")
+    with lock:
+        balances["quote"] += receive_quote
+        asset_balances[base] -= qty
+    return {"price": fill_price, "qty": qty, "fee_quote": receive_quote * fees_rate, "receive_quote": receive_quote}
+
+def add_trade(rec):
+    with lock:
+        trades.append(rec)
+
+def current_profit():
+    # mark-to-market open positions + quote balance vs start
+    with lock:
+        quote_now = balances.get("quote", 0.0)
+        mtm_assets = 0.0
+        for sym, pos in open_positions.items():
+            price = fetch_candles(sym)[-1]["close"]
+            mtm_assets += price * pos["qty"]
+        current = quote_now + mtm_assets
+        starting = start_balances["quote"] + start_balances["assets"]
+        p = current - starting
+        pctp = p / starting if starting > 0 else 0.0
+        return current, p, pctp
+
+def start_card(symbol, spend_quote=DEFAULT_SPEND):
+    global next_card_id
+    with lock:
+        cid = next_card_id
+        next_card_id += 1
+        active_cards[cid] = {
+            "id": cid,
+            "symbol": symbol,
+            "spend": spend_quote,
+            "created_at": utcnow_iso(),
+            "state": "scanning",
+            "mode": MODE
+        }
+    return cid
+
+def try_open_position(card, worker_id):
+    symbol = card["symbol"]
+    policy = make_policy(card["mode"])
+    check = evaluate_buy_checks(symbol, policy, worker_id)
+    if not check["ok"]:
+        return False
+    # place buy
+    fill = place_market_buy(symbol, card["spend"])
+    entry = fill["price"]
+    qty = fill["qty"]
+    with lock:
+        open_positions[symbol] = {
+            "symbol": symbol,
+            "entry": entry,
+            "qty": qty,
+            "opened_at": datetime.now(timezone.utc),
+            "peak": entry,
+            "mode": card["mode"]
+        }
+        card["state"] = "holding"
+        card["entry"] = entry
+        card["qty"] = qty
+    add_trade({
+        "type": "BUY",
+        "time": utcnow_iso(),
+        "symbol": symbol,
+        "price": entry,
+        "qty": qty,
+        "mode": card["mode"],
+        "note": "opened"
+    })
+    return True
+
+def manage_position(symbol):
+    with lock:
+        pos = open_positions.get(symbol)
+        if not pos:
+            return
+        entry = pos["entry"]
+        qty = pos["qty"]
+        mode = pos["mode"]
+        opened_at = pos["opened_at"]
+    price = fetch_candles(symbol)[-1]["close"]
+    gain = pct(price, entry)
+
+    # update peak for trailing
+    with lock:
+        if price > pos["peak"]:
+            pos["peak"] = price
+        peak = pos["peak"]
+
+    # exits
+    # hard TP
+    if gain >= TP_GROSS:
+        fill = place_market_sell(symbol, qty)
+        with lock:
+            open_positions.pop(symbol, None)
+        add_trade({
+            "type": "SELL",
+            "time": utcnow_iso(),
+            "symbol": symbol,
+            "price": fill["price"],
+            "qty": qty,
+            "mode": mode,
+            "note": "tp_hit"
+        })
+        return
+
+    # trail (armed after TRAIL_ARM)
+    if gain >= TRAIL_ARM:
+        drawdown = pct(price, peak)
+        if drawdown <= -TRAIL_GIVEBACK:
+            fill = place_market_sell(symbol, qty)
+            with lock:
+                open_positions.pop(symbol, None)
+            add_trade({
+                "type": "SELL",
+                "time": utcnow_iso(),
+                "symbol": symbol,
+                "price": fill["price"],
+                "qty": qty,
+                "mode": mode,
+                "note": "trail_hit"
+            })
+            return
+
+    # stop loss
+    if gain <= -STOP_LOSS:
+        fill = place_market_sell(symbol, qty)
+        with lock:
+            open_positions.pop(symbol, None)
+        add_trade({
+            "type": "SELL",
+            "time": utcnow_iso(),
+            "symbol": symbol,
+            "price": fill["price"],
+            "qty": qty,
+            "mode": mode,
+            "note": "sl_hit"
+        })
+        return
+
+    # timeout
+    age_min = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60.0
+    if age_min >= MAX_HOLD_MIN:
+        fill = place_market_sell(symbol, qty)
+        with lock:
+            open_positions.pop(symbol, None)
+        add_trade({
+            "type": "SELL",
+            "time": utcnow_iso(),
+            "symbol": symbol,
+            "price": fill["price"],
+            "qty": qty,
+            "mode": mode,
+            "note": "timeout"
+        })
+
+def worker_loop(worker_id, my_symbols):
+    while True:
+        try:
+            # scan open positions for exits
+            with lock:
+                symbols_open = list(open_positions.keys())
+                cards_local = list(active_cards.values())
+            for s in symbols_open:
+                manage_position(s)
+
+            # scan cards for entries
+            for card in cards_local:
+                if card["symbol"] not in my_symbols:
+                    continue
+                if card["state"] == "scanning":
+                    try_open_position(card, worker_id)
+                # don't buy same coin twice
+                elif card["state"] == "holding":
+                    pass
+                time.sleep(SCAN_SLEEP)
+        except Exception as e:
+            add_debug(f"worker_error:{e}", "N/A", worker_id, False, False, False, False)
+            time.sleep(1.0)
+
+def rebalance_symbols():
+    global watch_symbols
+    while True:
+        try:
+            syms = get_symbols_from_binance()
+            with lock:
+                watch_symbols = syms
+        except Exception as e:
+            add_debug(f"symbol_refresh_error:{e}", "N/A", 0, False, False, False, False)
+        time.sleep(REFRESH_SYMBOLS_EVERY)
+
+def start_workers():
+    # distribute symbols roughly evenly
+    threads = []
+    def chunk(lst, n):
+        k = max(1, len(lst)//n)
+        for i in range(n):
+            yield lst[i*k:(i+1)*k] if i < n-1 else lst[i*k:]
+    with lock:
+        syms = watch_symbols[:]
+    for wid, part in enumerate(chunk(syms, WORKERS), start=1):
+        t = threading.Thread(target=worker_loop, args=(wid, part), daemon=True)
+        t.start()
+        threads.append(t)
+    return threads
+
+# ====== API ROUTES ======
+@app.route("/")
+def home():
+    return jsonify({"ok": True, "message": "Bot backend running", "mode": MODE, "simulate": SIMULATE})
+
+@app.route("/api/status")
+def api_status():
+    now = utcnow_iso()
+    with lock:
+        open_list = []
+        for s, p in open_positions.items():
+            age = (datetime.now(timezone.utc) - p["opened_at"]).total_seconds()
+            open_list.append({
+                "symbol": s,
+                "entry": p["entry"],
+                "qty": p["qty"],
+                "mode": p["mode"],
+                "opened_at": p["opened_at"].isoformat(),
+                "age_sec": int(age),
+                "peak": p["peak"]
+            })
+        cards = list(active_cards.values())
+        ws = watch_symbols[:]
+        quote_bal = balances.get("quote", 0.0)
+    cur, prof, prof_pct = current_profit()
+    return jsonify({
+        "time": now,
+        "mode": MODE,
+        "simulate": SIMULATE,
+        "quote": QUOTE,
+        "quote_balance": round(quote_bal, 6),
+        "portfolio_value": round(cur, 6),
+        "profit_value": round(prof, 6),
+        "profit_pct": round(prof_pct, 6),
+        "open_positions": open_list,
+        "cards": cards,
+        "watch_count": len(ws),
+        "workers": WORKERS
+    })
+
+@app.route("/api/trades")
+def api_trades():
+    with lock:
+        return jsonify(trades)
+
+@app.route("/api/debug")
+def api_debug():
+    limit = int(request.args.get("limit", "500"))
+    with lock:
+        data = list(debug_events)[-limit:]
+    return jsonify(data)
+
+@app.route("/api/debug/toggle", methods=["POST"])
+def api_debug_toggle():
+    global debug_enabled
+    body = request.get_json(silent=True) or {}
+    val = body.get("enabled")
+    if isinstance(val, bool):
+        debug_enabled = val
+    return jsonify({"debug_enabled": debug_enabled})
+
+@app.route("/api/debug/export")
 def api_debug_export():
-    fmt = request.args.get("format", "csv").lower()
-    events = list(bot._debug_events)
-    if fmt == "json":
-        from json import dumps
-        return Response(dumps(events, ensure_ascii=False, indent=2), mimetype="application/json")
-    headers = ["time","worker_id","symbol","reason","day_ok","ema_ok","vol_ok","pattern_ok"]
-    def gen():
-        yield ",".join(headers) + "\n"
-        for e in events:
-            row = [str(e.get(h,"")) for h in headers]
+    # stream CSV
+    def generate():
+        header = ["time","worker_id","symbol","reason","day_ok","ema_ok","vol_ok","pattern_ok"]
+        yield ",".join(header) + "\n"
+        with lock:
+            snapshot = list(debug_events)
+        for r in snapshot:
+            row = [
+                r.get("time",""),
+                str(r.get("worker_id","")),
+                r.get("symbol",""),
+                r.get("reason",""),
+                str(r.get("day_ok","")),
+                str(r.get("ema_ok","")),
+                str(r.get("vol_ok","")),
+                str(r.get("pattern_ok",""))
+            ]
             yield ",".join(row) + "\n"
-    return Response(gen(), mimetype="text/csv",
+    return Response(generate(), mimetype="text/csv",
                     headers={"Content-Disposition":"attachment; filename=debug_events.csv"})
 
-# ---- Mode & Core/Workers ----
-@app.post("/api/mode")
+@app.route("/api/card", methods=["POST"])
+def api_card():
+    body = request.get_json(force=True)
+    symbol = body.get("symbol")
+    spend = float(body.get("spend", DEFAULT_SPEND))
+    if not symbol or not symbol.endswith(QUOTE):
+        return jsonify({"ok": False, "error": f"symbol must end with {QUOTE}"}), 400
+    cid = start_card(symbol, spend)
+    return jsonify({"ok": True, "card_id": cid})
+
+@app.route("/api/card/<int:cid>/stop", methods=["POST"])
+def api_card_stop(cid):
+    with lock:
+        card = active_cards.get(cid)
+        if not card:
+            return jsonify({"ok": False, "error": "card not found"}), 404
+        # If holding, force close
+        sym = card["symbol"]
+        pos = open_positions.get(sym)
+        if pos:
+            fill = place_market_sell(sym, pos["qty"])
+            open_positions.pop(sym, None)
+            add_trade({
+                "type": "SELL",
+                "time": utcnow_iso(),
+                "symbol": sym,
+                "price": fill["price"],
+                "qty": pos["qty"],
+                "mode": pos["mode"],
+                "note": "manual_close"
+            })
+        # remove card
+        active_cards.pop(cid, None)
+    return jsonify({"ok": True})
+
+@app.route("/api/mode", methods=["POST"])
 def api_mode():
-    data = request.get_json(force=True, silent=True) or {}
-    mode = str(data.get("mode","safe")).lower()
-    if mode not in ("safe","fast"):
-        return jsonify({"ok":False,"error":"mode must be 'safe' or 'fast'"}), 400
-    bot.mode = mode
-    return jsonify({"ok":True,"mode":bot.mode})
+    global MODE
+    body = request.get_json(force=True)
+    mode = body.get("mode","").lower()
+    if mode not in ("fast","safe"):
+        return jsonify({"ok": False, "error": "mode must be fast or safe"}), 400
+    MODE = mode
+    return jsonify({"ok": True, "mode": MODE})
 
-@app.post("/api/start-core")
-def api_start_core(): bot.start_core(); return jsonify({"ok": True})
+# ====== BOOT ======
+def boot_sim_balances_once():
+    # set starting balances (simulation)
+    with lock:
+        if "INIT_DONE" in balances:
+            return
+        start_balances["quote"] = balances.get("quote", 1000.0)
+        start_balances["assets"] = 0.0
+        balances["INIT_DONE"] = 1
 
-@app.post("/api/stop-core")
-def api_stop_core(): bot.stop_core(); return jsonify({"ok": True})
-
-@app.post("/api/add-worker")
-def api_add_worker():
-    data = request.get_json(force=True, silent=True) or {}
-    wid = bot.add_worker(float(data.get("quote", 20.0)))
-    return jsonify({"ok": True, "worker_id": wid})
-
-@app.post("/api/stop-worker")
-def api_stop_worker():
-    data = request.get_json(force=True, silent=True) or {}
-    bot.stop_worker(int(data.get("worker_id"))); return jsonify({"ok": True})
+def main():
+    global watch_symbols
+    boot_sim_balances_once()
+    watch_symbols = get_symbols_from_binance()
+    # symbol refresher
+    threading.Thread(target=rebalance_symbols, daemon=True).start()
+    # workers
+    start_workers()
+    # web
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
 
 if __name__ == "__main__":
-    load_dotenv(); port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    main()
