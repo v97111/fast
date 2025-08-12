@@ -165,10 +165,10 @@ def get_net_usdt_value(client) -> float:
 def make_policy(mode:str):
     if mode == "fast":
         return {
-            "ema_relax": 0.992,      # >= 99.2% of EMA50
-            "vol_mult": 0.85,        # >= 0.85× avg10 OR top-3 volume
+            "ema_relax": 0.996,      # >= 99.2% of EMA50
+            "vol_mult": 1.0,        # >= 0.85× avg10 OR top-3 volume
             "min_day_vol": MIN_DAY_VOLATILITY_PCT,
-            "pattern": "bounce_only" # last close > prev close
+            "pattern": "none" # last close > prev close
         }
     else:  # SAFE (strict EMA/vol; realistic 0.6% dip + prev high recovery)
         return {
@@ -226,6 +226,8 @@ def evaluate_buy_checks(client, symbol, cache, policy):
         if len(candles) >= 3:
             last = candles[-2]; prev = candles[-3]
             pattern_ok = last["close"] > prev["close"]
+    elif policy["pattern"] == "none":
+    pattern_ok = True
 
     # Reason
     if not day_ok:      reason = "low_24h_move"
