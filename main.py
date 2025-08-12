@@ -215,18 +215,30 @@ def evaluate_buy_checks(client, symbol, cache, policy):
             vol_ok = bool(cond_soft or cond_rank)
 
     # Pattern
-    pattern_ok = False
-    if policy["pattern"] == "prev_high":
-        if len(candles) >= 2:
-            c_prev = candles[-2]; c_last = candles[-1]
-            dipped = (c_prev["close"] > 0) and ((c_prev["close"] - c_prev["low"]) / c_prev["close"] >= SAFE_DROP_PCT)
-            recovered = c_last["close"] > c_prev["high"]
-            pattern_ok = dipped and recovered
-    else:  # bounce_only (FAST)
-        if len(candles) >= 3:
-            last = candles[-2]; prev = candles[-3]
-            pattern_ok = last["close"] > prev["close"]
-        pattern_ok
+   pattern_ok = False
+
+if policy["pattern"] == "prev_high":  # Safe mode
+    if len(candles) >= 2:
+        c_prev = candles[-2]
+        c_last = candles[-1]
+        dipped = (c_prev["close"] > 0) and ((c_prev["close"] - c_prev["low"]) / c_prev["close"] >= SAFE_DROP_PCT)
+        recovered = c_last["close"] > c_prev["high"]
+        pattern_ok = dipped and recovered
+
+elif policy["pattern"] == "none":  
+    # Extra filter so not all coins pass immediately
+    if len(candles) >= 2:
+        c_prev = candles[-2]
+        c_last = candles[-1]
+        small_gain = (c_last["close"] - c_prev["close"]) / c_prev["close"] >= 0.002  # 0.2% mini gain filter
+        pattern_ok = small_gain
+
+else:  # bounce_only (FAST)
+    if len(candles) >= 3:
+        last = candles[-2]
+        prev = candles[-3]
+        pattern_ok = last["close"] > prev["close"]
+
     
 
     # Reason
