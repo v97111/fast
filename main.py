@@ -214,8 +214,8 @@ def evaluate_buy_checks(client, symbol, cache, policy):
             cond_rank = bool(block) and (last_closed_vol >= (top3[-1] if len(top3)==3 else (top3[-1] if top3 else 0)))
             vol_ok = bool(cond_soft or cond_rank)
 
-    # Pattern
-   pattern_ok = False
+# --- Pattern Check ---
+pattern_ok = False
 
 if policy["pattern"] == "prev_high":  # Safe mode
     if len(candles) >= 2:
