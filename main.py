@@ -16,7 +16,7 @@ Exits for both:
 - Stop-loss -1.5%, Max trade time 45m
 
 Dashboard:
-- Mobile friendly, worker cards, debug (toggle/copy/export), trade history
+- Mobile friendly, worker cards, live unrealized PnL, time-in-trade, debug (toggle/copy/export), trade history
 """
 import os, time, csv, math, threading, sys
 from datetime import datetime, timedelta, timezone
@@ -170,7 +170,7 @@ def make_policy(mode:str):
             "min_day_vol": MIN_DAY_VOLATILITY_PCT,
             "pattern": "bounce_only" # last close > prev close
         }
-    else:  # SAFE (unchanged strict EMA/vol; realistic 0.6% dip + prev high recovery)
+    else:  # SAFE (strict EMA/vol; realistic 0.6% dip + prev high recovery)
         return {
             "ema_relax": 1.0,        # strictly above EMA50
             "vol_mult": 1.2,         # require a spike
@@ -277,6 +277,10 @@ class WorkerState:
         self.status = "scanning"
         self.symbol = None; self.last_pnl = None
         self.note = "Scanning watchlist…"; self.updated = now_utc().isoformat()
+        # live-trade context for UI
+        self.entry_price = None
+        self.qty = None
+        self.started = None  # datetime
 
 class FastCycleBot:
     def __init__(self):
@@ -396,6 +400,12 @@ class FastCycleBot:
                 start = now_utc()
                 log_row([start.isoformat(), sym, "BUY", f"{entry:.8f}", f"{qty:.8f}", "", "worker", wid])
 
+                # store trade context for UI
+                st.symbol = sym
+                st.entry_price = entry
+                st.qty = qty
+                st.started = start
+
                 hard_tp  = entry * (1 + TAKE_PROFIT_MIN_PCT)
                 trail_arm= entry * (1 + TRAIL_ARM_PCT)
                 stop_loss= entry * (1 - STOP_LOSS_PCT)
@@ -414,6 +424,8 @@ class FastCycleBot:
                         pnl = (exitp/entry - 1)*100.0
                         log_row([ts.isoformat(), sym, "SELL_TP_HARD", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", "hard-tp", wid])
                         self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
+                        # clear context
+                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
                         break
 
                     # Arm trailing at stronger profit
@@ -429,6 +441,7 @@ class FastCycleBot:
                             pnl = (exitp/entry - 1)*100.0
                             log_row([ts.isoformat(), sym, "SELL_TP_TRAIL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", "trailing", wid])
                             self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
+                            st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
                             break
 
                     # Stop-loss
@@ -438,6 +451,7 @@ class FastCycleBot:
                         pnl = (exitp/entry - 1)*100.0
                         log_row([ts.isoformat(), sym, "SELL_SL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", "stop-loss", wid])
                         self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
+                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
                         break
 
                     # Time exit
@@ -447,6 +461,7 @@ class FastCycleBot:
                         pnl = (exitp/entry - 1)*100.0
                         log_row([ts.isoformat(), sym, "SELL_TIME", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"time>{MAX_TRADE_MINUTES}m", wid])
                         self._last_sell_time[sym] = now_utc(); self._update_state(wid, last_pnl=pnl)
+                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
                         break
 
                     time.sleep(POLL_SECONDS_ACTIVE)
@@ -471,9 +486,30 @@ class FastCycleBot:
 
         workers = []
         for wid, st in self._worker_state.items():
+            # defaults
+            unreal_pct = unreal_usd = None
+            cur_price = tp_price = trail_arm_price = sl_price = None
+            started_iso = st.started.isoformat() if st.started else None
+
+            # compute live metrics if in position
+            if st.status == "in_position" and st.symbol and st.entry_price and st.qty:
+                try:
+                    cur_price = get_price(self._client, st.symbol)
+                    unreal_pct = (cur_price / st.entry_price - 1.0) * 100.0
+                    unreal_usd = (cur_price - st.entry_price) * st.qty
+                    tp_price = st.entry_price * (1.0 + TAKE_PROFIT_MIN_PCT)
+                    trail_arm_price = st.entry_price * (1.0 + TRAIL_ARM_PCT)
+                    sl_price = st.entry_price * (1.0 - STOP_LOSS_PCT)
+                except Exception:
+                    pass
+
             workers.append({
                 "id": st.id, "quote": st.quote, "status": st.status, "symbol": st.symbol,
-                "last_pnl": st.last_pnl, "note": st.note, "updated": st.updated
+                "last_pnl": st.last_pnl, "note": st.note, "updated": st.updated,
+                # live ctx
+                "entry_price": st.entry_price, "qty": st.qty, "started": started_iso,
+                "cur_price": cur_price, "unreal_pct": unreal_pct, "unreal_usd": unreal_usd,
+                "tp_price": tp_price, "trail_arm_price": trail_arm_price, "sl_price": sl_price
             })
         workers.sort(key=lambda x: x["id"])
 
