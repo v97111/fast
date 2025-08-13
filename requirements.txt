@@ -4,3 +4,4 @@ python-binance
 python-dotenv
 flask-cors
 flask-socketio
+gevent-websocket

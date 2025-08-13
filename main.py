@@ -768,9 +768,17 @@ def background_updates():
             print(f"Error in background updates: {e}")
             socketio.sleep(5)
 
+# Start background task when the module is loaded (for both gunicorn and direct execution)
+try:
+    # Only start if not already started
+    if not hasattr(socketio, '_background_task_started'):
+        socketio.start_background_task(background_updates)
+        socketio._background_task_started = True
+except Exception as e:
+    print(f"Warning: Could not start background task: {e}")
+
 if __name__ == "__main__":
-    load_dotenv(); port = int(os.getenv("PORT", "8080"))
-    # Start background task
-    socketio.start_background_task(background_updates)
-    # Run with SocketIO instead of plain Flask
+    load_dotenv()
+    port = int(os.getenv("PORT", "8080"))
+    # Run with SocketIO for local development
     socketio.run(app, host="0.0.0.0", port=port, debug=False)
