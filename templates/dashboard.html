@@ -145,6 +145,40 @@
       51%, 100% { opacity: 0.6; }
     }
     
+    /* Loading states */
+    .loading-shimmer {
+      background: linear-gradient(90deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0.1) 100%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    
+    /* Connection status indicator */
+    .connection-status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 8px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      z-index: 1000;
+      transition: all 0.3s ease;
+    }
+    .connection-online {
+      background: rgba(16, 185, 129, 0.9);
+      color: white;
+      backdrop-filter: blur(10px);
+    }
+    .connection-offline {
+      background: rgba(239, 68, 68, 0.9);
+      color: white;
+      backdrop-filter: blur(10px);
+    }
+    
     /* Enhanced card hover effects */
     .card {
       transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -181,6 +215,65 @@
     .tp-level { border-left: 3px solid #10b981; padding-left: 6px; }
     .sl-level { border-left: 3px solid #ef4444; padding-left: 6px; }
     .trail-level { border-left: 3px solid #f59e0b; padding-left: 6px; }
+    
+    /* Enhanced mobile responsiveness */
+    @media (max-width: 768px) {
+      .container { padding: 12px; }
+      header { padding: 12px; flex-direction: column; gap: 12px; }
+      .row { justify-content: center; }
+      .grid { grid-template-columns: 1fr; }
+      .grid-3 { grid-template-columns: 1fr; }
+      .kv { grid-template-columns: 1fr; gap: 4px; }
+      .card { padding: 12px; }
+      .btn { padding: 12px 16px; min-height: 44px; /* Touch-friendly */ }
+      .seg button { padding: 10px 12px; min-height: 40px; }
+      input[type="number"] { min-height: 44px; font-size: 16px; /* Prevents zoom on iOS */ }
+      
+      /* Better mobile cards */
+      .status-badge { font-size: 11px; padding: 3px 6px; }
+      .price-level { font-size: 11px; }
+      .time-display { font-size: 12px; }
+      
+      /* Hide less important columns on mobile */
+      table { font-size: 12px; }
+      .col-worker, .col-qty { display: none; }
+    }
+    
+    @media (max-width: 480px) {
+      h1 { font-size: 16px; }
+      .card { margin-bottom: 12px; }
+      .col-note { display: none; }
+      
+      /* Stack header elements vertically on very small screens */
+      header { align-items: stretch; }
+      .seg { align-self: center; }
+    }
+    
+    /* Smooth page transitions */
+    * {
+      -webkit-tap-highlight-color: transparent;
+    }
+    
+    /* Focus states for accessibility */
+    button:focus, input:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: var(--bg);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--muted);
+    }
   </style>
   <script src="/socket.io/socket.io.js"></script>
 </head>
@@ -199,6 +292,11 @@
       </div>
     </div>
   </header>
+
+  <!-- Connection status indicator -->
+  <div id="connectionStatus" class="connection-status connection-offline">
+    🔄 Connecting...
+  </div>
 
   <div class="container">
     <div class="grid">
@@ -361,6 +459,17 @@
 
     function renderWorkers(workers){
       const wrap = document.getElementById('cards');
+      
+      // Show loading state initially
+      if (workers === undefined) {
+        wrap.innerHTML = `
+          <div class="card loading-shimmer" style="min-height: 150px; display: flex; align-items: center; justify-content: center;">
+            <div class="muted">Loading cards... <span class="spinner"></span></div>
+          </div>
+        `;
+        return;
+      }
+      
       wrap.innerHTML = '';
       if(!workers || !workers.length){
         wrap.innerHTML = '<div class="muted">No cards yet. Enter an amount then press "Add Card" to start.</div>';
@@ -585,14 +694,41 @@
     let socket = null;
     let useWebSocket = true;
     let fallbackInterval = null;
+    
+    // Connection status management
+    function updateConnectionStatus(status, message) {
+      const statusEl = document.getElementById('connectionStatus');
+      if (status === 'online') {
+        statusEl.className = 'connection-status connection-online';
+        statusEl.innerHTML = '🟢 Live Updates';
+      } else if (status === 'polling') {
+        statusEl.className = 'connection-status connection-offline';
+        statusEl.innerHTML = '🟡 Polling Mode';
+      } else {
+        statusEl.className = 'connection-status connection-offline';
+        statusEl.innerHTML = '🔄 Connecting...';
+      }
+      
+      // Auto-hide status after 3 seconds if online
+      if (status === 'online') {
+        setTimeout(() => {
+          statusEl.style.opacity = '0.7';
+        }, 3000);
+      } else {
+        statusEl.style.opacity = '1';
+      }
+    }
 
     function initializeWebSocket() {
+      updateConnectionStatus('connecting');
+      
       try {
         socket = io();
         
         socket.on('connect', function() {
           console.log('WebSocket connected');
           useWebSocket = true;
+          updateConnectionStatus('online');
           // Clear fallback polling if active
           if (fallbackInterval) {
             clearInterval(fallbackInterval);
@@ -603,6 +739,7 @@
         socket.on('disconnect', function() {
           console.log('WebSocket disconnected, falling back to polling');
           useWebSocket = false;
+          updateConnectionStatus('polling');
           startFallbackPolling();
         });
 
@@ -627,12 +764,14 @@
         socket.on('connect_error', function(error) {
           console.log('WebSocket connection error, falling back to polling:', error);
           useWebSocket = false;
+          updateConnectionStatus('polling');
           startFallbackPolling();
         });
 
       } catch (error) {
         console.log('WebSocket not available, using polling fallback:', error);
         useWebSocket = false;
+        updateConnectionStatus('polling');
         startFallbackPolling();
       }
     }
@@ -640,6 +779,7 @@
     function startFallbackPolling() {
       if (!fallbackInterval) {
         console.log('Starting fallback polling mode');
+        updateConnectionStatus('polling');
         fallbackInterval = setInterval(function() {
           if (!useWebSocket) {
             refresh();
