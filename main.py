@@ -629,7 +629,9 @@ class FastCycleBot:
 # ------------------ Flask ------------------
 app = Flask(__name__, template_folder="templates")
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', 
+                   logger=False, engineio_logger=False, 
+                   ping_timeout=60, ping_interval=25)
 bot = FastCycleBot()
 
 @app.route("/")
@@ -718,27 +720,41 @@ def api_stop_worker():
     data = request.get_json(force=True, silent=True) or {}
     bot.stop_worker(int(data.get("worker_id"))); return jsonify({"ok": True})
 
-# ---- WebSocket Events ----
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected')
-    # Send initial data immediately upon connection
-    emit('status_update', bot.dashboard_state())
-    emit('trades_update', {"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
-    if bot.debug_enabled:
-        events = list(bot._debug_events)[-200:]
-        counts = defaultdict(int)
-        for e in events: counts[e["reason"]] += 1
-        debug_data = {
-            "enabled": bot.debug_enabled,
-            "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)),
-            "events": events[::-1]
-        }
-        emit('debug_update', debug_data)
+    """Handle client connection and start background task if needed"""
+    print(f'Client connected - Session ID: {request.sid}')
+    try:
+        # Send initial data immediately upon connection
+        emit('status_update', bot.dashboard_state())
+        emit('trades_update', {"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
+        if bot.debug_enabled:
+            events = list(bot._debug_events)[-200:]
+            counts = defaultdict(int)
+            for e in events: counts[e["reason"]] += 1
+            debug_data = {
+                "enabled": bot.debug_enabled,
+                "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)),
+                "events": events[::-1]
+            }
+            emit('debug_update', debug_data)
+        
+        # Only start background task if not already started
+        if not hasattr(socketio, '_background_task_started'):
+            print('Starting background task for real-time updates')
+            socketio.start_background_task(background_updates)
+            socketio._background_task_started = True
+    except Exception as e:
+        print(f"Error in connect handler: {e}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected')
+    print(f'Client disconnected - Session ID: {request.sid}')
+
+@socketio.on_error_default
+def default_error_handler(e):
+    print(f'SocketIO error: {e}')
+    return False
 
 # Background task to broadcast updates
 def background_updates():
@@ -769,16 +785,6 @@ def background_updates():
             socketio.sleep(5)
 
 # Background task will be started via SocketIO event handlers
-@socketio.on('connect')
-def handle_connect():
-    """Handle client connection and start background task if needed"""
-    try:
-        # Only start if not already started
-        if not hasattr(socketio, '_background_task_started'):
-            socketio.start_background_task(background_updates)
-            socketio._background_task_started = True
-    except Exception as e:
-        print(f"Warning: Could not start background task: {e}")
 
 if __name__ == "__main__":
     load_dotenv()

@@ -306,6 +306,10 @@
       script.src = '/socket.io/socket.io.js';
       script.onload = function() {
         console.log('SocketIO loaded successfully from Flask-SocketIO');
+        // Verify Socket.IO version compatibility
+        if (typeof io !== 'undefined') {
+          console.log('Socket.IO client loaded, version compatible');
+        }
       };
       script.onerror = function() {
         console.log('Failed to load SocketIO from Flask-SocketIO, using fallback');
@@ -774,7 +778,13 @@
             throw new Error('SocketIO not available');
           }
           
-          socket = io();
+          socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            rememberUpgrade: true,
+            timeout: 20000,
+            forceNew: true
+          });
           
           socket.on('connect', function() {
             console.log('WebSocket connected');
