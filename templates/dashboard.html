@@ -55,6 +55,132 @@
     input:checked + .slider{background:#10b981}
     input:checked + .slider:before{transform:translateX(20px)}
     .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
+    
+    /* Enhanced status badges and icons */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .status-scanning {
+      background: linear-gradient(135deg, #0ea5e9, #0284c7);
+      color: white;
+      animation: pulse 2s infinite;
+    }
+    .status-in-position {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: white;
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+    }
+    .status-selling {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      color: white;
+      animation: blink 1s infinite;
+    }
+    .status-error {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      color: white;
+    }
+    
+    /* Enhanced P&L styling */
+    .pnl-display {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 600;
+    }
+    .pnl-positive {
+      color: #10b981;
+      background: rgba(16, 185, 129, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(16, 185, 129, 0.2);
+    }
+    .pnl-negative {
+      color: #ef4444;
+      background: rgba(239, 68, 68, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(239, 68, 68, 0.2);
+    }
+    
+    /* Progress indicators */
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 4px 0;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #10b981, #34d399);
+      border-radius: 4px;
+      transition: width 0.5s ease;
+    }
+    .progress-fill.danger {
+      background: linear-gradient(90deg, #ef4444, #f87171);
+    }
+    
+    /* Icons */
+    .icon {
+      font-style: normal;
+      font-size: 14px;
+    }
+    
+    /* Animations */
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    @keyframes blink {
+      0%, 50% { opacity: 1; }
+      51%, 100% { opacity: 0.6; }
+    }
+    
+    /* Enhanced card hover effects */
+    .card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 15px 40px rgba(0,0,0,.35);
+    }
+    
+    /* Time display enhancement */
+    .time-display {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    
+    /* Price level indicators */
+    .price-level {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 2px 0;
+      font-size: 12px;
+    }
+    .price-level .label {
+      color: var(--muted);
+    }
+    .price-level .value {
+      font-family: monospace;
+      font-weight: 600;
+    }
+    .tp-level { border-left: 3px solid #10b981; padding-left: 6px; }
+    .sl-level { border-left: 3px solid #ef4444; padding-left: 6px; }
+    .trail-level { border-left: 3px solid #f59e0b; padding-left: 6px; }
   </style>
   <script src="/socket.io/socket.io.js"></script>
 </head>
@@ -172,6 +298,26 @@
 
     function cls(v){ return (v>=0) ? 'pnl-pos' : 'pnl-neg'; }
     function fmt(v,d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
+    
+    // Enhanced P&L display helper
+    function updatePnLDisplay(usdValue, pctValue) {
+      const usdEl = document.getElementById('p_usd');
+      const pctEl = document.getElementById('p_pct');
+      
+      if (usdValue == null || pctValue == null) {
+        usdEl.innerHTML = '-';
+        pctEl.innerHTML = '-';
+        return;
+      }
+      
+      const isPositive = usdValue >= 0;
+      const arrow = isPositive ? '↗' : '↘';
+      const colorClass = isPositive ? 'pnl-positive' : 'pnl-negative';
+      
+      usdEl.innerHTML = `<span class="${colorClass}">${arrow} ${isPositive?'+':''}${Number(usdValue).toFixed(2)} USDT</span>`;
+      pctEl.innerHTML = `<span class="${colorClass}">${isPositive?'+':''}${Number(pctValue).toFixed(2)}%</span>`;
+    }
+    
     async function post(url, body){ await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):'{}'}); }
     async function addWorker(){ 
       const amt=parseFloat(document.getElementById('amt').value||'20'); 
@@ -226,23 +372,101 @@
         const sym = w.symbol || '-';
         const note = w.note || '-';
 
-        // live PnL
+        // Enhanced status badge with icons
+        function getStatusBadge(status, symbol) {
+          let icon = '';
+          let badgeClass = 'status-badge';
+          
+          switch(status) {
+            case 'scanning':
+              icon = '🔍';
+              badgeClass += ' status-scanning';
+              break;
+            case 'buying':
+              icon = '📈';
+              badgeClass += ' status-in-position';
+              break;
+            case 'in_position':
+              icon = '💰';
+              badgeClass += ' status-in-position';
+              break;
+            case 'selling':
+              icon = '📉';
+              badgeClass += ' status-selling';
+              break;
+            default:
+              icon = '❓';
+              badgeClass += ' status-error';
+          }
+          
+          return `<span class="${badgeClass}">${icon} ${status}</span>`;
+        }
+
+        // live PnL with enhanced styling
         const uPct = (w.unreal_pct==null) ? '-' : `${Number(w.unreal_pct).toFixed(3)}%`;
         const uUsd = (w.unreal_usd==null) ? '-' : `${(w.unreal_usd>=0?'+':'')+Number(w.unreal_usd).toFixed(3)} USDT`;
         const curP = (w.cur_price==null) ? '-' : Number(w.cur_price).toFixed(6);
         const entP = (w.entry_price==null) ? '-' : Number(w.entry_price).toFixed(6);
 
+        // Enhanced P&L display
+        function getPnLDisplay(pct, usd) {
+          if (pct === '-') return `<div class="pnl-display">${pct} <span class="muted">(${usd})</span></div>`;
+          
+          const isPositive = w.unreal_pct >= 0;
+          const pnlClass = isPositive ? 'pnl-positive' : 'pnl-negative';
+          const arrow = isPositive ? '↗' : '↘';
+          
+          return `<div class="pnl-display">
+            <span class="${pnlClass}">${arrow} ${pct}</span>
+            <span class="muted">(${usd})</span>
+          </div>`;
+        }
+
         const tpP   = (w.tp_price==null) ? '-' : Number(w.tp_price).toFixed(6);
         const taP   = (w.trail_arm_price==null) ? '-' : Number(w.trail_arm_price).toFixed(6);
         const slP   = (w.sl_price==null) ? '-' : Number(w.sl_price).toFixed(6);
 
-        // time in trade
+        // Enhanced price targets display
+        function getPriceTargets() {
+          if (tpP === '-' && taP === '-' && slP === '-') {
+            return '<div class="muted">No active position</div>';
+          }
+          
+          return `
+            <div style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+              ${tpP !== '-' ? `<div class="price-level tp-level"><span class="label">Take Profit:</span><span class="value">${tpP}</span></div>` : ''}
+              ${taP !== '-' ? `<div class="price-level trail-level"><span class="label">Trail Start:</span><span class="value">${taP}</span></div>` : ''}
+              ${slP !== '-' ? `<div class="price-level sl-level"><span class="label">Stop Loss:</span><span class="value">${slP}</span></div>` : ''}
+            </div>
+          `;
+        }
+
+        // time in trade with enhanced styling
         const started = w.started ? new Date(w.started) : null;
         let heldTxt = '-';
         if(started){
           const secs = Math.max(0, Math.floor((Date.now() - started.getTime())/1000));
           const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = secs%60;
-          heldTxt = `${h>0?String(h).padStart(2,'0')+':':''}${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+          heldTxt = `<span class="time-display">${h>0?String(h).padStart(2,'0')+':':''}${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}</span>`;
+        }
+
+        // Progress indicator for position (if in position)
+        function getProgressIndicator() {
+          if (w.status !== 'in_position' || !w.cur_price || !w.entry_price) return '';
+          
+          const pct = w.unreal_pct || 0;
+          const maxPct = 5; // Show progress up to ±5%
+          const progressPct = Math.min(Math.abs(pct) / maxPct * 100, 100);
+          const isDanger = pct < -1; // Red if losing > 1%
+          
+          return `
+            <div style="margin: 4px 0;">
+              <div style="font-size: 11px; color: var(--muted); margin-bottom: 2px;">Position Progress</div>
+              <div class="progress-bar">
+                <div class="progress-fill ${isDanger ? 'danger' : ''}" style="width: ${progressPct}%"></div>
+              </div>
+            </div>
+          `;
         }
 
         const card = document.createElement('div');
@@ -252,24 +476,28 @@
             <div><strong>Card #${w.id}</strong> • <span class="muted mono">${toUae(w.updated)}</span></div>
             <button class="btn stop" onclick="stopWorker(${w.id})">Stop</button>
           </div>
-          <div class="kv mono">
-            <div>Budget:</div><div>${fmt(w.quote,2)} USDT</div>
-            <div>Status:</div><div>${scanning?'<span class="spinner"></span> ':''}<span>${w.status}</span></div>
-            <div>Coin:</div><div>${sym}</div>
+          <div class="kv" style="font-size: 13px;">
+            <div>Budget:</div><div class="mono">${fmt(w.quote,2)} USDT</div>
+            <div>Status:</div><div>${getStatusBadge(w.status, sym)}</div>
+            <div>Coin:</div><div><strong>${sym}</strong></div>
 
-            <div>Buy Price:</div><div>${entP}</div>
-            <div>Now:</div><div>${curP}</div>
+            ${w.status === 'in_position' ? `
+            <div>Buy Price:</div><div class="mono">${entP}</div>
+            <div>Current Price:</div><div class="mono">${curP}</div>
 
-            <div>Current Gain/Loss:</div>
-            <div><span class="${(w.unreal_pct==null)?'':(w.unreal_pct>=0?'pnl-pos':'pnl-neg')}">${uPct}</span> <span class="muted">(${uUsd})</span></div>
+            <div>Current P&L:</div>
+            ${getPnLDisplay(uPct, uUsd)}
+            
+            ${getProgressIndicator()}
 
-            <div>Targets:</div>
-            <div>Take profit ${tpP} • Trail start ${taP} • Stop loss ${slP}</div>
+            <div>Price Targets:</div>
+            <div>${getPriceTargets()}</div>
 
             <div>Time in Trade:</div><div>${heldTxt}</div>
+            ` : ''}
 
-            <div>Last Result (closed):</div><div>${pnl}</div>
-            <div>Note:</div><div>${note}</div>
+            <div>Last Result:</div><div class="mono ${w.last_pnl !== null && w.last_pnl >= 0 ? 'pnl-pos' : w.last_pnl !== null ? 'pnl-neg' : ''}">${pnl}</div>
+            <div>Note:</div><div class="muted" style="font-size: 12px;">${note}</div>
           </div>`;
         wrap.appendChild(card);
       });
@@ -316,8 +544,7 @@
         document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':Number(st.start_net_usdt).toFixed(2));
         document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':Number(st.current_net_usdt).toFixed(2));
         const pusd=st.profit_usd, ppct=st.profit_pct;
-        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${Number(pusd).toFixed(2)} USDT`);
-        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${Number(ppct).toFixed(2)}%`);
+        updatePnLDisplay(pusd, ppct);
         renderWorkers(st.workers||[]);
       }catch(e){}
       try{
@@ -437,8 +664,7 @@
         document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':Number(st.start_net_usdt).toFixed(2));
         document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':Number(st.current_net_usdt).toFixed(2));
         const pusd=st.profit_usd, ppct=st.profit_pct;
-        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${Number(pusd).toFixed(2)} USDT`);
-        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${Number(ppct).toFixed(2)}%`);
+        updatePnLDisplay(pusd, ppct);
         renderWorkers(st.workers||[]);
       }catch(e){console.error('Error updating status:', e);}
     }
