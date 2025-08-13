@@ -56,6 +56,7 @@
     input:checked + .slider:before{transform:translateX(20px)}
     .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
   </style>
+  <script src="/socket.io/socket.io.js"></script>
 </head>
 <body>
   <header>
@@ -172,13 +173,21 @@
     function cls(v){ return (v>=0) ? 'pnl-pos' : 'pnl-neg'; }
     function fmt(v,d=2){ if(v===null||v===undefined||isNaN(v)) return '-'; return Number(v).toFixed(d); }
     async function post(url, body){ await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):'{}'}); }
-    async function addWorker(){ const amt=parseFloat(document.getElementById('amt').value||'20'); await post('/api/add-worker',{quote:amt}); await refresh(); }
-    async function stopWorker(id){ await post('/api/stop-worker',{worker_id:id}); await refresh(); }
+    async function addWorker(){ 
+      const amt=parseFloat(document.getElementById('amt').value||'20'); 
+      await post('/api/add-worker',{quote:amt}); 
+      // No need to manually refresh with WebSocket - updates will come automatically
+      if (!useWebSocket) await refresh(); 
+    }
+    async function stopWorker(id){ 
+      await post('/api/stop-worker',{worker_id:id}); 
+      if (!useWebSocket) await refresh(); 
+    }
     async function setMode(mode){
       await post('/api/mode',{mode});
       document.getElementById('btnSafe').classList.toggle('active',mode==='safe');
       document.getElementById('btnFast').classList.toggle('active',mode==='fast');
-      await refresh();
+      if (!useWebSocket) await refresh();
     }
     async function toggleDebug(enabled){
       await fetch('/api/debug/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
@@ -345,9 +354,137 @@
       }catch(e){}
     }
 
-    setInterval(refresh, 2000);
-    setInterval(refreshDebug, 2000);
-    post('/api/start-core').then(()=>{ refresh(); refreshDebug(); });
+    // WebSocket Connection with fallback to polling
+    let socket = null;
+    let useWebSocket = true;
+    let fallbackInterval = null;
+
+    function initializeWebSocket() {
+      try {
+        socket = io();
+        
+        socket.on('connect', function() {
+          console.log('WebSocket connected');
+          useWebSocket = true;
+          // Clear fallback polling if active
+          if (fallbackInterval) {
+            clearInterval(fallbackInterval);
+            fallbackInterval = null;
+          }
+        });
+
+        socket.on('disconnect', function() {
+          console.log('WebSocket disconnected, falling back to polling');
+          useWebSocket = false;
+          startFallbackPolling();
+        });
+
+        socket.on('status_update', function(data) {
+          if (useWebSocket) {
+            updateStatus(data);
+          }
+        });
+
+        socket.on('trades_update', function(data) {
+          if (useWebSocket) {
+            updateTrades(data);
+          }
+        });
+
+        socket.on('debug_update', function(data) {
+          if (useWebSocket) {
+            updateDebug(data);
+          }
+        });
+
+        socket.on('connect_error', function(error) {
+          console.log('WebSocket connection error, falling back to polling:', error);
+          useWebSocket = false;
+          startFallbackPolling();
+        });
+
+      } catch (error) {
+        console.log('WebSocket not available, using polling fallback:', error);
+        useWebSocket = false;
+        startFallbackPolling();
+      }
+    }
+
+    function startFallbackPolling() {
+      if (!fallbackInterval) {
+        console.log('Starting fallback polling mode');
+        fallbackInterval = setInterval(function() {
+          if (!useWebSocket) {
+            refresh();
+            refreshDebug();
+          }
+        }, 2000);
+      }
+    }
+
+    // Extract update logic from refresh functions for reuse
+    function updateStatus(st) {
+      try {
+        document.getElementById('modeTxt').textContent = st.mode || 'safe';
+        document.getElementById('btnSafe').classList.toggle('active', st.mode==='safe');
+        document.getElementById('btnFast').classList.toggle('active', st.mode==='fast');
+
+        document.getElementById('dbgToggle').checked = !!st.debug_enabled;
+        document.getElementById('dbgState').textContent = st.debug_enabled ? 'ON' : 'OFF';
+
+        document.getElementById('wlc').textContent = st.watchlist_count ?? '-';
+        document.getElementById('wlt').textContent = st.watchlist_total ?? '-';
+        document.getElementById('startv').textContent = (st.start_net_usdt==null?'-':Number(st.start_net_usdt).toFixed(2));
+        document.getElementById('curv').textContent   = (st.current_net_usdt==null?'-':Number(st.current_net_usdt).toFixed(2));
+        const pusd=st.profit_usd, ppct=st.profit_pct;
+        document.getElementById('p_usd').innerHTML = (pusd==null?'-':`${pusd>=0?'+':''}${Number(pusd).toFixed(2)} USDT`);
+        document.getElementById('p_pct').innerHTML = (ppct==null?'-':`${ppct>=0?'+':''}${Number(ppct).toFixed(2)}%`);
+        renderWorkers(st.workers||[]);
+      }catch(e){console.error('Error updating status:', e);}
+    }
+
+    function updateTrades(data) {
+      try{
+        const rows = data.rows || []; tbody.innerHTML='';
+        if(rows.length===0){
+          const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=8; td.className='muted'; td.textContent='No trades yet.'; tr.appendChild(td); tbody.appendChild(tr);
+        }else{
+          rows.forEach(r=>{
+            const tr=document.createElement('tr'); const pnl=parseFloat(r.pnl_pct||'');
+            tr.innerHTML = `
+              <td>${toUae(r.time)}</td>
+              <td class="col-worker">${r.worker_id||''}</td>
+              <td>${r.symbol}</td>
+              <td><span class="chip">${r.action}</span></td>
+              <td>${r.price}</td>
+              <td class="col-qty">${r.qty}</td>
+              <td class="${isNaN(pnl)?'':(pnl>=0?'pnl-pos':'pnl-neg')}">${r.pnl_pct||''}</td>
+              <td class="col-note">${r.note||''}</td>`;
+            tbody.appendChild(tr);
+          });
+        }
+      }catch(e){console.error('Error updating trades:', e);}
+    }
+
+    function updateDebug(data) {
+      try{
+        document.getElementById('dbgToggle').checked = !!data.enabled;
+        document.getElementById('dbgState').textContent = data.enabled ? 'ON' : 'OFF';
+        renderDebugCounts(data.counts || {});
+        renderDebugEvents(data.events || []);
+      }catch(e){console.error('Error updating debug:', e);}
+    }
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', function() {
+      initializeWebSocket();
+      post('/api/start-core').then(()=>{ 
+        if (!useWebSocket) {
+          refresh(); 
+          refreshDebug(); 
+        }
+      });
+    });
   </script>
 </body>
 </html>

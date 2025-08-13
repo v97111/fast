@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from typing import Dict, List
 from flask import Flask, render_template, jsonify, request, Response
+from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 from binance.client import Client
 
@@ -627,6 +628,8 @@ class FastCycleBot:
 
 # ------------------ Flask ------------------
 app = Flask(__name__, template_folder="templates")
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 bot = FastCycleBot()
 
 @app.route("/")
@@ -715,6 +718,59 @@ def api_stop_worker():
     data = request.get_json(force=True, silent=True) or {}
     bot.stop_worker(int(data.get("worker_id"))); return jsonify({"ok": True})
 
+# ---- WebSocket Events ----
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+    # Send initial data immediately upon connection
+    emit('status_update', bot.dashboard_state())
+    emit('trades_update', {"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
+    if bot.debug_enabled:
+        events = list(bot._debug_events)[-200:]
+        counts = defaultdict(int)
+        for e in events: counts[e["reason"]] += 1
+        debug_data = {
+            "enabled": bot.debug_enabled,
+            "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)),
+            "events": events[::-1]
+        }
+        emit('debug_update', debug_data)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+# Background task to broadcast updates
+def background_updates():
+    """Background task to emit updates to all connected clients"""
+    while True:
+        try:
+            # Emit status update
+            socketio.emit('status_update', bot.dashboard_state())
+            
+            # Emit trades update  
+            socketio.emit('trades_update', {"rows": read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)})
+            
+            # Emit debug update if enabled
+            if bot.debug_enabled:
+                events = list(bot._debug_events)[-200:]
+                counts = defaultdict(int)
+                for e in events: counts[e["reason"]] += 1
+                debug_data = {
+                    "enabled": bot.debug_enabled,
+                    "counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)),
+                    "events": events[::-1]
+                }
+                socketio.emit('debug_update', debug_data)
+            
+            socketio.sleep(2)  # Update every 2 seconds
+        except Exception as e:
+            print(f"Error in background updates: {e}")
+            socketio.sleep(5)
+
 if __name__ == "__main__":
     load_dotenv(); port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Start background task
+    socketio.start_background_task(background_updates)
+    # Run with SocketIO instead of plain Flask
+    socketio.run(app, host="0.0.0.0", port=port, debug=False)
