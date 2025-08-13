@@ -65,8 +65,7 @@
         <button id="btnSafe" class="active" onclick="setMode('safe')">Safe</button>
         <button id="btnFast" onclick="setMode('fast')">Fast</button>
       </div>
-      <button class="btn start" onclick="post('/api/start-core')">Start Core</button>
-      <button class="btn stop"  onclick="post('/api/stop-core')">Stop Core</button>
+      <button class="btn stop"  onclick="post('/api/stop-core')">Stop All</button>
       <div class="row">
         <input type="number" id="amt" min="10" step="1" value="20" />
         <button class="btn add" onclick="addWorker()">Add Card</button>
@@ -78,21 +77,21 @@
     <div class="grid">
       <!-- Left -->
       <div class="card">
-        <h3 style="margin:0 0 10px">Global Status</h3>
+        <h3 style="margin:0 0 10px">Overview</h3>
         <div class="kv" id="global">
-          <div>Mode:</div><div><span id="modeTxt">safe</span> <span class="muted">(Safe dip ≥ {{ safe_drop_pct }}%, strict EMA/vol)</span></div>
+          <div>Mode:</div><div><span id="modeTxt">safe</span> <span class="muted">(Safe: stricter entries • Fast: more entries)</span></div>
 
           <div>Watchlist:</div>
           <div>Valid <span id="wlc">-</span> <span class="muted">(from <span id="wlt">-</span>)</span></div>
 
-          <div>Start Net (USDT):</div><div id="startv">-</div>
-          <div>Current Net (USDT):</div><div id="curv">-</div>
+          <div>Starting Balance (USDT):</div><div id="startv">-</div>
+          <div>Current Balance (USDT):</div><div id="curv">-</div>
 
           <div>Profit:</div>
           <div><span id="p_usd">-</span> <span class="muted">(<span id="p_pct">-</span>)</span></div>
 
-          <div>Exit Rules:</div>
-          <div><code>Hard TP +{{ '%.2f' % tp_trigger_pct }}% → Trail arm +{{ '%.2f' % trail_arm }}% / giveback {{ '%.2f' % trail_pct }}% | SL {{ '%.2f' % sl_pct }}% | Time {{ time_limit }}m</code></div>
+          <div>How exits work:</div>
+          <div>Sell for a quick profit at +{{ '%.2f' % tp_trigger_pct }}%. If price rises further (+{{ '%.2f' % trail_arm }}%), start a trailing take‑profit with {{ '%.2f' % trail_pct }}% giveback. Cut loss at −{{ '%.2f' % sl_pct }}%.</div>
 
           <div>Watchlist Symbols:</div>
           <div>
@@ -106,13 +105,13 @@
         </div>
 
         <hr style="border-color:#223058;margin:12px 0">
-        <h3 style="margin:0 0 10px">Worker Cards</h3>
+        <h3 style="margin:0 0 10px">Cards</h3>
         <div id="cards" class="grid-3"></div>
-        <div class="muted" style="margin-top:6px">Cards scan concurrently. A spinner shows when scanning/buying/selling.</div>
+        <div class="muted" style="margin-top:6px">Each card spends the amount you set. It scans coins and buys only when rules match.</div>
 
         <!-- Debug (collapsible) -->
         <details style="margin-top:12px" id="dbgDetails">
-          <summary>Debug Panel (why buys are rejected)</summary>
+          <summary>Why a buy didn’t happen (debug)</summary>
           <div class="card" style="margin-top:10px">
             <div class="row" style="justify-content:space-between; margin-bottom:8px">
               <label style="display:flex;align-items:center;gap:10px">
@@ -132,8 +131,8 @@
               <table id="dbg-table">
                 <thead>
                   <tr>
-                    <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Reason</th>
-                    <th>24h</th><th>EMA</th><th>Vol</th><th class="col-note">Pattern</th>
+                    <th>Time (UTC)</th><th class="col-worker">Card</th><th>Coin</th><th>Reason</th>
+                    <th>Day range</th><th>Trend</th><th>Volume</th><th class="col-note">Pattern</th>
                   </tr>
                 </thead>
                 <tbody id="dbg-body">
@@ -153,7 +152,7 @@
           <table id="trades">
             <thead>
               <tr>
-                <th>Time (UTC)</th><th class="col-worker">Worker</th><th>Symbol</th><th>Action</th>
+                <th>Time (UAE)</th><th class="col-worker">Card</th><th>Coin</th><th>Action</th>
                 <th>Price</th><th class="col-qty">Qty</th><th>PnL %</th><th class="col-note">Note</th>
               </tr>
             </thead>
@@ -195,11 +194,21 @@
       }catch(e){ alert('Copy failed'); }
     }
 
+    function toUae(dtIso){
+      if(!dtIso) return '-';
+      const d=new Date(dtIso);
+      const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Dubai',year:'2-digit',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+      // Convert "13 Aug 25, 21:07" to "25/Aug/13 21:07"
+      const parts=fmt.formatToParts(d);
+      const p=Object.fromEntries(parts.filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));
+      return `${p.year}/${p.month}/${p.day} ${p.hour}:${p.minute}`;
+    }
+
     function renderWorkers(workers){
       const wrap = document.getElementById('cards');
       wrap.innerHTML = '';
       if(!workers || !workers.length){
-        wrap.innerHTML = '<div class="muted">No cards yet. Add one with an amount and it will start scanning.</div>';
+        wrap.innerHTML = '<div class="muted">No cards yet. Enter an amount then press "Add Card" to start.</div>';
         return;
       }
       workers.forEach(w=>{
@@ -231,26 +240,26 @@
         card.className = 'card';
         card.innerHTML = `
           <div class="row" style="justify-content:space-between; margin-bottom:6px">
-            <div><strong>Card #${w.id}</strong> • <span class="muted mono">${(w.updated||'').replace('T',' ').replace('Z','')}</span></div>
+            <div><strong>Card #${w.id}</strong> • <span class="muted mono">${toUae(w.updated)}</span></div>
             <button class="btn stop" onclick="stopWorker(${w.id})">Stop</button>
           </div>
           <div class="kv mono">
-            <div>Amount:</div><div>${fmt(w.quote,2)} USDT</div>
+            <div>Budget:</div><div>${fmt(w.quote,2)} USDT</div>
             <div>Status:</div><div>${scanning?'<span class="spinner"></span> ':''}<span>${w.status}</span></div>
-            <div>Symbol:</div><div>${sym}</div>
+            <div>Coin:</div><div>${sym}</div>
 
-            <div>Entry Price:</div><div>${entP}</div>
-            <div>Current Price:</div><div>${curP}</div>
+            <div>Buy Price:</div><div>${entP}</div>
+            <div>Now:</div><div>${curP}</div>
 
-            <div>Unrealized:</div>
+            <div>Current Gain/Loss:</div>
             <div><span class="${(w.unreal_pct==null)?'':(w.unreal_pct>=0?'pnl-pos':'pnl-neg')}">${uPct}</span> <span class="muted">(${uUsd})</span></div>
 
             <div>Targets:</div>
-            <div>TP ${tpP} • TrailArm ${taP} • SL ${slP}</div>
+            <div>Take profit ${tpP} • Trail start ${taP} • Stop loss ${slP}</div>
 
             <div>Time in Trade:</div><div>${heldTxt}</div>
 
-            <div>Last PnL (realized):</div><div>${pnl}</div>
+            <div>Last Result (closed):</div><div>${pnl}</div>
             <div>Note:</div><div>${note}</div>
           </div>`;
         wrap.appendChild(card);
@@ -271,7 +280,7 @@
       events.forEach(e=>{
         const tr=document.createElement('tr');
         tr.innerHTML = `
-          <td>${(e.time||'').replace('T',' ').replace('Z','')}</td>
+          <td>${toUae(e.time)}</td>
           <td class="col-worker">${e.worker_id ?? ''}</td>
           <td>${e.symbol}</td>
           <td><span class="chip">${e.reason}</span></td>
@@ -311,7 +320,7 @@
           rows.forEach(r=>{
             const tr=document.createElement('tr'); const pnl=parseFloat(r.pnl_pct||'');
             tr.innerHTML = `
-              <td>${r.time}</td>
+              <td>${toUae(r.time)}</td>
               <td class="col-worker">${r.worker_id||''}</td>
               <td>${r.symbol}</td>
               <td><span class="chip">${r.action}</span></td>
