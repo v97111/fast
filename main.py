@@ -648,6 +648,12 @@ def dashboard():
         recent_limit=RECENT_TRADES_LIMIT
     )
 
+@app.get("/health")
+def health_check():
+    """Lightweight health check endpoint for deployment platform readiness checks.
+    Returns 200 OK without performing heavy operations like Binance client calls."""
+    return "ok", 200
+
 @app.get("/api/status")
 def api_status(): return jsonify(bot.dashboard_state())
 
