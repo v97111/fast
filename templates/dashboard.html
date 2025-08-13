@@ -275,7 +275,52 @@
       background: var(--muted);
     }
   </style>
-  <script src="/socket.io/socket.io.js"></script>
+  <!-- SocketIO with local fallback solution -->
+  <script>
+    // Check if SocketIO is loaded, if not create a fallback implementation
+    function ensureSocketIO() {
+      if (typeof io === 'undefined') {
+        console.log('SocketIO not available, creating fallback implementation');
+        window.io = function() {
+          return {
+            on: function(event, callback) {
+              console.log('Fallback SocketIO: ignoring event', event);
+            },
+            emit: function(event, data) {
+              console.log('Fallback SocketIO: ignoring emit', event);
+            },
+            connect: function() {
+              console.log('Fallback SocketIO: connect ignored');
+            },
+            disconnect: function() {
+              console.log('Fallback SocketIO: disconnect ignored');
+            }
+          };
+        };
+      }
+    }
+    
+    // Try to load SocketIO from Flask-SocketIO's built-in endpoint
+    function loadSocketIO() {
+      const script = document.createElement('script');
+      script.src = '/socket.io/socket.io.js';
+      script.onload = function() {
+        console.log('SocketIO loaded successfully from Flask-SocketIO');
+      };
+      script.onerror = function() {
+        console.log('Failed to load SocketIO from Flask-SocketIO, using fallback');
+        ensureSocketIO();
+      };
+      document.head.appendChild(script);
+    }
+    
+    // Load SocketIO when DOM is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', loadSocketIO);
+    } else {
+      loadSocketIO();
+    }
+  </script>
 </head>
 <body>
   <header>
@@ -722,58 +767,65 @@
     function initializeWebSocket() {
       updateConnectionStatus('connecting');
       
-      try {
-        socket = io();
-        
-        socket.on('connect', function() {
-          console.log('WebSocket connected');
-          useWebSocket = true;
-          updateConnectionStatus('online');
-          // Clear fallback polling if active
-          if (fallbackInterval) {
-            clearInterval(fallbackInterval);
-            fallbackInterval = null;
+      // Wait a bit for SocketIO to load, then try to connect
+      setTimeout(function() {
+        try {
+          if (typeof io === 'undefined') {
+            throw new Error('SocketIO not available');
           }
-        });
+          
+          socket = io();
+          
+          socket.on('connect', function() {
+            console.log('WebSocket connected');
+            useWebSocket = true;
+            updateConnectionStatus('online');
+            // Clear fallback polling if active
+            if (fallbackInterval) {
+              clearInterval(fallbackInterval);
+              fallbackInterval = null;
+            }
+          });
 
-        socket.on('disconnect', function() {
-          console.log('WebSocket disconnected, falling back to polling');
+          socket.on('disconnect', function() {
+            console.log('WebSocket disconnected, falling back to polling');
+            useWebSocket = false;
+            updateConnectionStatus('polling');
+            startFallbackPolling();
+          });
+
+          socket.on('status_update', function(data) {
+            if (useWebSocket) {
+              updateStatus(data);
+            }
+          });
+
+          socket.on('trades_update', function(data) {
+            if (useWebSocket) {
+              updateTrades(data);
+            }
+          });
+
+          socket.on('debug_update', function(data) {
+            if (useWebSocket) {
+              updateDebug(data);
+            }
+          });
+
+          socket.on('connect_error', function(error) {
+            console.log('WebSocket connection error, falling back to polling:', error);
+            useWebSocket = false;
+            updateConnectionStatus('polling');
+            startFallbackPolling();
+          });
+
+        } catch (error) {
+          console.log('WebSocket not available, using polling fallback:', error);
           useWebSocket = false;
           updateConnectionStatus('polling');
           startFallbackPolling();
-        });
-
-        socket.on('status_update', function(data) {
-          if (useWebSocket) {
-            updateStatus(data);
-          }
-        });
-
-        socket.on('trades_update', function(data) {
-          if (useWebSocket) {
-            updateTrades(data);
-          }
-        });
-
-        socket.on('debug_update', function(data) {
-          if (useWebSocket) {
-            updateDebug(data);
-          }
-        });
-
-        socket.on('connect_error', function(error) {
-          console.log('WebSocket connection error, falling back to polling:', error);
-          useWebSocket = false;
-          updateConnectionStatus('polling');
-          startFallbackPolling();
-        });
-
-      } catch (error) {
-        console.log('WebSocket not available, using polling fallback:', error);
-        useWebSocket = false;
-        updateConnectionStatus('polling');
-        startFallbackPolling();
-      }
+        }
+      }, 1000); // Wait 1 second for SocketIO to load
     }
 
     function startFallbackPolling() {
