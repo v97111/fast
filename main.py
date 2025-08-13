@@ -768,14 +768,17 @@ def background_updates():
             print(f"Error in background updates: {e}")
             socketio.sleep(5)
 
-# Start background task when the module is loaded (for both gunicorn and direct execution)
-try:
-    # Only start if not already started
-    if not hasattr(socketio, '_background_task_started'):
-        socketio.start_background_task(background_updates)
-        socketio._background_task_started = True
-except Exception as e:
-    print(f"Warning: Could not start background task: {e}")
+# Background task will be started via SocketIO event handlers
+@socketio.on('connect')
+def handle_connect():
+    """Handle client connection and start background task if needed"""
+    try:
+        # Only start if not already started
+        if not hasattr(socketio, '_background_task_started'):
+            socketio.start_background_task(background_updates)
+            socketio._background_task_started = True
+    except Exception as e:
+        print(f"Warning: Could not start background task: {e}")
 
 if __name__ == "__main__":
     load_dotenv()
