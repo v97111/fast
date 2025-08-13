@@ -629,7 +629,7 @@ class FastCycleBot:
 # ------------------ Flask ------------------
 app = Flask(__name__, template_folder="templates")
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', 
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', 
                    logger=False, engineio_logger=False, 
                    ping_timeout=60, ping_interval=25)
 bot = FastCycleBot()
